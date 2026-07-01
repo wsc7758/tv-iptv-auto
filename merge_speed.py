@@ -181,7 +181,8 @@ def main():
     for ch_name in white_order_list:
         if ch_name not in ch_link_map:
             continue
-        url_list = ch_link_map
+        # 修复之前的笔误：正确读取该频道的链接列表
+        url_list = ch_link_map[ch_name]
         temp_store = []
         # 并发测速+分辨率检测
         with concurrent.futures.ThreadPoolExecutor(max_workers=CHANNEL_TEST_WORKER) as exe:
