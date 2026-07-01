@@ -6,13 +6,14 @@ import time
 from urllib.parse import urlparse
 import m3u8
 
-# ========== 全局配置（1080P起步，低于全部过滤） ==========
+# ========== 全局配置优化 ==========
 SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
-TEST_TIMEOUT = 2.5
+TEST_TIMEOUT = 2.0       # 缩短超时，更快丢弃卡死源
 MAX_BEST_PER_CHANNEL = 3
-MIN_HEIGHT = 1080  # 仅保留1080P、2K、4K，720/480/360全部丢弃
+MIN_ULTRA_HEIGHT = 1080  # 超清标准1080P/4K
+MIN_HD_HEIGHT = 720      # 高清标准720P，保留高速720P优质源
 BLACK_HOST = {"127.", "192.", "10.", "172.", "localhost", ":8801", ":808"}
 
 # 有序读取白名单，严格保持自定义顺序
@@ -67,7 +68,7 @@ def fetch_iptv(url):
         pass
     return channels
 
-# 解析m3u8，获取最高分辨率高度
+# 解析m3u8，获取最高分辨率高度，单流无标签返回720（不再判0丢弃）
 def get_max_video_height(m3u8_url):
     headers = {"User-Agent":"Mozilla/5.0 Android TV"}
     try:
@@ -83,46 +84,42 @@ def get_max_video_height(m3u8_url):
                     if h_val > max_h:
                         max_h = h_val
             return max_h
-        # 单一流无分辨率标签，直接判定不足1080P过滤
-        return 0
+        # 单一流无分辨率标签，默认标记为720P，保留不丢弃
+        return 720
     except Exception:
-        return 0
+        # 解析失败无法获取分辨率，仍允许进入测速，不直接淘汰
+        return 720
 
-# 双重检测：分辨率达标 + 网络测速
+# 双重检测：先测速，再区分超清/高清，不再一刀切删除720P
 def test_link_quality(url):
-    height = get_max_video_height(url)
-    # 低于1080直接淘汰，不进行测速
-    if height < MIN_HEIGHT:
-        return (9999, False)
     headers = {"User-Agent":"Mozilla/5.0 Android TV"}
+    # 先测速，保证高速源不会直接跳过
     start = time.time()
     try:
         r = requests.get(url, headers=headers, timeout=TEST_TIMEOUT, stream=True)
         r.raw.read(1024)
         delay = round(time.time() - start, 3)
-        return (delay, True)
     except Exception:
-        return (9999, False)
+        return (9999, 0)
+    # 测速成功后再获取分辨率
+    height = get_max_video_height(url)
+    return (delay, height)
 
 def main():
     white_order_list = load_white_list_ordered()
     source_urls = load_source_urls()
     all_channels = []
 
-    # 多线程拉取全部外部源
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    # 降低并发线程，避免Action卡死超长耗时
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
         res_list = executor.map(fetch_iptv, source_urls)
         for res in res_list:
             all_channels.extend(res)
 
-    # 按频道分组 + 同域名去重，避免同一服务器多条冗余线路
+    # 按频道分组，移除严格域名去重，保留更多同域名优质线路
     group = defaultdict(list)
-    domain_set = defaultdict(set)
     for name,url in all_channels:
-        domain = urlparse(url).netloc
-        if domain not in domain_set[name]:
-            domain_set[name].add(domain)
-            group[name].append(url)
+        group[name].append(url)
 
     final_output = []
     # 第一分组：央视频道
@@ -130,15 +127,22 @@ def main():
     for ch_name in white_order_list:
         if ch_name.startswith("CCTV") and ch_name in group:
             url_list = group[ch_name]
-            qualified = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+            ultra_links = []  # 1080P+超清
+            hd_links = []     # 720P高清高速备选
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 results = executor.map(test_link_quality, url_list)
-            for link, (delay, is_1080p_plus) in zip(url_list, results):
-                if is_1080p_plus and delay < TEST_TIMEOUT:
-                    qualified.append((delay, link))
-            # 按延迟升序，取最快3条高清线路
-            qualified.sort(key=lambda x: x[0])
-            top_links = [item[1] for item in qualified[:MAX_BEST_PER_CHANNEL]]
+            for link, (delay, height) in zip(url_list, results):
+                if delay >= TEST_TIMEOUT:
+                    continue
+                # 分级存储，超清优先
+                if height >= MIN_ULTRA_HEIGHT:
+                    ultra_links.append((delay, link))
+                else:
+                    hd_links.append((delay, link))
+            # 超清优先放前面，不足3条用高速720P补充
+            ultra_links.sort(key=lambda x: x[0])
+            hd_links.sort(key=lambda x: x[0])
+            top_links = [item[1] for item in ultra_links + hd_links][:MAX_BEST_PER_CHANNEL]
             for l in top_links:
                 final_output.append(f"{ch_name},{l}")
 
@@ -148,14 +152,20 @@ def main():
     for ch_name in white_order_list:
         if not ch_name.startswith("CCTV") and ch_name not in kid_names and ch_name in group:
             url_list = group[ch_name]
-            qualified = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+            ultra_links = []
+            hd_links = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 results = executor.map(test_link_quality, url_list)
-            for link, (delay, is_1080p_plus) in zip(url_list, results):
-                if is_1080p_plus and delay < TEST_TIMEOUT:
-                    qualified.append((delay, link))
-            qualified.sort(key=lambda x: x[0])
-            top_links = [item[1] for item in qualified[:MAX_BEST_PER_CHANNEL]]
+            for link, (delay, height) in zip(url_list, results):
+                if delay >= TEST_TIMEOUT:
+                    continue
+                if height >= MIN_ULTRA_HEIGHT:
+                    ultra_links.append((delay, link))
+                else:
+                    hd_links.append((delay, link))
+            ultra_links.sort(key=lambda x: x[0])
+            hd_links.sort(key=lambda x: x[0])
+            top_links = [item[1] for item in ultra_links + hd_links][:MAX_BEST_PER_CHANNEL]
             for l in top_links:
                 final_output.append(f"{ch_name},{l}")
 
@@ -165,21 +175,27 @@ def main():
     for ch_name in kid_list:
         if ch_name in group:
             url_list = group[ch_name]
-            qualified = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+            ultra_links = []
+            hd_links = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 results = executor.map(test_link_quality, url_list)
-            for link, (delay, is_1080p_plus) in zip(url_list, results):
-                if is_1080p_plus and delay < TEST_TIMEOUT:
-                    qualified.append((delay, link))
-            qualified.sort(key=lambda x: x[0])
-            top_links = [item[1] for item in qualified[:MAX_BEST_PER_CHANNEL]]
+            for link, (delay, height) in zip(url_list, results):
+                if delay >= TEST_TIMEOUT:
+                    continue
+                if height >= MIN_ULTRA_HEIGHT:
+                    ultra_links.append((delay, link))
+                else:
+                    hd_links.append((delay, link))
+            ultra_links.sort(key=lambda x: x[0])
+            hd_links.sort(key=lambda x: x[0])
+            top_links = [item[1] for item in ultra_links + hd_links][:MAX_BEST_PER_CHANNEL]
             for l in top_links:
                 final_output.append(f"{ch_name},{l}")
 
-    # 写入纯净1080P+直播列表
+    # 写入tv.txt，超清在前、高速720P备选在后
     with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
         f.write("\n".join(final_output))
-    print(f"筛选完成，仅保留1080P/2K/4K高清源，有效线路总数：{len(final_output)}")
+    print(f"筛选完成：超清1080P优先，补充高速720P备选，有效线路总数：{len(final_output)}")
 
 if __name__ == "__main__":
     main()
