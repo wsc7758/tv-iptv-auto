@@ -1,11 +1,17 @@
+import sys
+# 强制标准输出UTF8，解决中文乱码
+sys.stdout.reconfigure(encoding="utf-8")
 import requests
 import concurrent.futures
 import re
 from collections import defaultdict
 import time
 import m3u8
+import urllib3
+# 全局关闭SSL不安全警告，消除刷屏日志
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ===================== 全局业务配置常量 =====================
+# ===================== 全局业务配置 =====================
 SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
@@ -16,8 +22,20 @@ SOURCE_FETCH_TIMEOUT = 6
 INCOMPATIBLE_FILTER = {"127.", "192.168.", "10.", "172.", "localhost", "rtmp://", "igmp://"}
 SOURCE_FETCH_WORKERS = 6
 STREAM_EVAL_WORKERS = 10
+DEBUG_LOG = False  # 线上关闭调试日志，True本地排查开启
 
-# ===================== 底层工具能力函数 =====================
+# ===================== 底层工具函数 =====================
+def clean_channel_name(name: str) -> str:
+    """清洗频道名：去除横杠、高清/4K/后缀，提升模糊匹配率"""
+    name = name.strip().lower()
+    # 清除无关后缀
+    suffix_list = ["高清", "超清", "4k", "综合", "财经", "综艺", "电影", "纪录", "少儿", "音乐", "体育赛事", "国防军事"]
+    for s in suffix_list:
+        name = name.replace(s.lower(), "")
+    # 清除横杠、空格
+    name = name.replace("-", "").replace(" ", "")
+    return name
+
 def is_incompatible_stream(url: str) -> bool:
     url_lower = url.lower()
     for keyword in INCOMPATIBLE_FILTER:
@@ -27,9 +45,9 @@ def is_incompatible_stream(url: str) -> bool:
 
 def get_stream_priority(url: str) -> int:
     url_lower = url.lower()
-    if "migu" in url_lower or "miguvideo" in url_lower:
+    if "migu" in url or "miguvideo" in url:
         return 0
-    if "cctv.cn" in url_lower or "live.cctv" in url_lower or "yangshipin" in url_lower:
+    if "cctv.cn" in url or "live.cctv" in url or "yangshipin" in url:
         return 0
     return 1
 
@@ -85,19 +103,23 @@ def load_raw_source_pool() -> list[str]:
     print(f"【阶段1-源池加载】待拉取直播源节点总数：{len(full_source_list)}")
     return full_source_list
 
-def load_white_list_spec() -> tuple[list[str], set[str]]:
+def load_white_list_spec() -> tuple[list[str], set[str], dict[str, str]]:
+    """返回：原始有序列表、清洗后匹配集合、原始名-清洗名映射"""
     order_benchmark = []
-    quick_match_set_lower = set()
+    clean_match_set = set()
+    name_mapping = {}
     with open(WHITE_LIST_FILE, "r", encoding="utf-8") as f:
         for line in f.readlines():
             ln = line.strip()
             if ln and not ln.startswith("#"):
                 order_benchmark.append(ln)
-                quick_match_set_lower.add(ln.lower())
+                clean_name = clean_channel_name(ln)
+                clean_match_set.add(clean_name)
+                name_mapping[clean_name] = ln
     print(f"【阶段1-白名单加载】基准频道序列总量：{len(order_benchmark)}")
-    return order_benchmark, quick_match_set_lower
+    return order_benchmark, clean_match_set, name_mapping
 
-def fetch_source_channel_index(src_url: str, white_set_lower: set[str]) -> list[tuple[str, str]]:
+def fetch_source_channel_index(src_url: str, white_clean_set: set[str], name_map: dict[str, str]) -> list[tuple[str, str]]:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0 Safari/537.36"
     }
@@ -107,27 +129,36 @@ def fetch_source_channel_index(src_url: str, white_set_lower: set[str]) -> list[
     try:
         resp = requests.get(src_url, headers=headers, timeout=SOURCE_FETCH_TIMEOUT, verify=False)
         text = resp.text
-        print(f"【调试】源地址 {src_url} 拉取成功，文本长度：{len(text)}")
+        if DEBUG_LOG:
+            print(f"【调试】源地址 {src_url} 拉取成功，文本长度：{len(text)}")
+        # TXT匹配
         txt_reg = re.compile(r"([^,]+),(http[s]?://[^\n]+)")
         for ch_name, link in txt_reg.findall(text):
             ch_name = ch_name.strip().replace("#genre#", "")
             link = link.strip()
-            ch_low = ch_name.lower()
-            print(f"【调试-TXT提取频道】{ch_name}")
-            # 过滤#开头M3U标签行
-            if ch_low in white_set_lower and not is_incompatible_stream(link) and not ch_name.startswith("#"):
-                valid_pair.append((ch_name, link))
+            clean_ch = clean_channel_name(ch_name)
+            if DEBUG_LOG:
+                print(f"【调试-TXT提取原始名】{ch_name} 清洗后：{clean_ch}")
+            # 过滤#标签、不兼容链接，模糊匹配白名单
+            if clean_ch in white_clean_set and not is_incompatible_stream(link) and not ch_name.startswith("#"):
+                real_ori_name = name_map[clean_ch]
+                valid_pair.append((real_ori_name, link))
+        # M3U8匹配
         m3u8_reg = re.compile(r"#EXTINF:-1,([^\n]+)\n(http[s]?://[^\n]+)")
         for ch_name, link in m3u8_reg.findall(text):
             ch_name = ch_name.strip()
             link = link.strip()
-            ch_low = ch_name.lower()
-            print(f"【调试-M3U8提取频道】{ch_name}")
-            if ch_low in white_set_lower and not is_incompatible_stream(link) and not ch_name.startswith("#"):
-                valid_pair.append((ch_name, link))
+            clean_ch = clean_channel_name(ch_name)
+            if DEBUG_LOG:
+                print(f"【调试-M3U8提取原始名】{ch_name} 清洗后：{clean_ch}")
+            if clean_ch in white_clean_set and not is_incompatible_stream(link) and not ch_name.startswith("#"):
+                real_ori_name = name_map[clean_ch]
+                valid_pair.append((real_ori_name, link))
     except Exception as e:
-        print(f"【调试】源地址 {src_url} 拉取失败，异常详情：{str(e)}")
-    print(f"【调试】该源匹配白名单有效频道数量：{len(valid_pair)}")
+        if DEBUG_LOG:
+            print(f"【调试】源地址 {src_url} 拉取失败，异常详情：{str(e)}")
+    if DEBUG_LOG:
+        print(f"【调试】该源匹配白名单有效频道数量：{len(valid_pair)}")
     return valid_pair
 
 # ===================== 阶段2：流媒体一体化质量评测与链路择优 =====================
@@ -165,20 +196,20 @@ def generate_output_file(white_order: list[str], filter_map: dict[str, list[str]
         f.write("\n".join(output_rows))
     print(f"【阶段3-输出完成】最终合规流媒体链路总条数：{len(output_rows)}")
 
-# ===================== 主业务流水线入口 =====================
+# ===================== 主入口 =====================
 def main():
     source_pool = load_raw_source_pool()
-    white_order_bench, white_match_set_lower = load_white_list_spec()
+    white_order_bench, white_clean_set, white_name_map = load_white_list_spec()
     channel_link_cache = defaultdict(list)
     with concurrent.futures.ThreadPoolExecutor(max_workers=SOURCE_FETCH_WORKERS) as exe:
-        all_source_channel_data = exe.map(lambda s: fetch_source_channel_index(s, white_match_set_lower), source_pool)
-    for ch_pair_list in all_source_channel_data:
+        all_source_data = exe.map(lambda s: fetch_source_channel(s, white_clean_set, white_name_map), source_pool)
+    for ch_pair_list in all_source_data:
         for ch, url in ch_pair_list:
             channel_link_cache[ch].append(url)
     print(f"【阶段1完成】预过滤后待评测频道数量：{len(channel_link_cache)}")
-    qualified_channel_links = evaluate_and_filter_streams(channel_link_cache)
-    print(f"【阶段2完成】完成质量评测的有效频道数量：{len(qualified_channel_links)}")
-    generate_output_file(white_order_bench, qualified_channel_links)
+    qualified_links = evaluate_and_filter_streams(channel_link_cache)
+    print(f"【阶段2完成】完成画质测速的有效频道数量：{len(qualified_links)}")
+    generate_output_file(white_order_bench, qualified_links)
 
 if __name__ == "__main__":
     main()
