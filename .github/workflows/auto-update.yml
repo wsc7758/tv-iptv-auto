@@ -1,16 +1,14 @@
-name IPTV自动更新
+name: IPTV自动更新
 on:
-  workflow_dispatch:  # 支持页面手动点运行，不用等定时
+  workflow_dispatch:
   schedule:
-    # UTC时间，对应北京时间 早上5点 / 傍晚17点 每日两次更新
-    - cron: '0 5 * * *'
-    - cron: '0 17 * * *'
+    - cron: '0 2 * * *'
 
 jobs:
   run_filter:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 允许提交修改后的tv.txt
+      contents: write
     steps:
       - name: 拉取仓库全部代码
         uses: actions/checkout@v4
@@ -29,5 +27,4 @@ jobs:
           git config --global user.name "IPTV-Bot"
           git config --global user.email "bot@github.com"
           git add tv.txt
-          # 无变更不提交，避免空提交记录
           git diff --quiet && git diff --staged || (git commit -m "自动刷新 咪咕/央视频优先 720P+线路" && git push)
