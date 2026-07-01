@@ -133,7 +133,11 @@ def fetch_channel_from_source(src_link: str, white_lower_set: set[str]) -> list[
 # ===================== 阶段2：并发测速、筛选最优流 =====================
 def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list[str]]:
     final_map = defaultdict(list)
+    total_ch = len(channel_raw_map)
+    curr = 0
     for ch_name, url_list in channel_raw_map.items():
+        curr += 1
+        print(f"【阶段2测速进度】{curr}/{total_ch} 正在测速频道：{ch_name}")
         task_list = url_list
         eval_res = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=STREAM_EVAL_WORKERS) as exe:
