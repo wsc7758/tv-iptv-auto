@@ -1,10 +1,8 @@
 name: IPTV标准化流媒体分拣流水线
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
-  schedule:
-    - cron: '0 22 * * *'
-    - cron: '0 10 * * *'
-
 jobs:
   stream-sort-task:
     runs-on: ubuntu-latest
@@ -31,10 +29,8 @@ jobs:
           python3 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
           python3 -m pip install requests m3u8 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-      # ==========新增这一段==========
-      - name: 列出当前目录所有文件，检查必备文件是否存在
+      - name: 列出当前目录所有文件，校验必备文件是否存在
         run: ls -la
-      # =============================
 
       - name: 执行标准化分拣流水线 merge_speed.py（无缓冲实时日志）
         run: python3 -u merge_speed.py
