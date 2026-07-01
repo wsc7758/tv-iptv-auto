@@ -110,36 +110,33 @@ def load_white_list_spec() -> tuple[list[str], set[str]]:
     return order_benchmark, quick_match_set_lower
 
 def fetch_source_channel_index(src_url: str, white_set_lower: set[str]) -> list[tuple[str, str]]:
-    """单源频道索引拉取+前置过滤：兼容大小写匹配，自动修复无协议链接，关闭SSL校验"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0 Safari/537.36"
     }
     valid_pair = []
-    # 自动修复 // 开头缺少https协议的链接
     if src_url.startswith("//"):
         src_url = "https:" + src_url
     try:
-        # 新增 verify=False 关闭SSL证书校验，解决IP证书不匹配报错
         resp = requests.get(src_url, headers=headers, timeout=SOURCE_FETCH_TIMEOUT, verify=False)
         text = resp.text
         print(f"【调试】源地址 {src_url} 拉取成功，文本长度：{len(text)}")
-        # 标准txt频道匹配规则
         txt_reg = re.compile(r"([^,]+),(http[s]?://[^\n]+)")
         for ch_name, link in txt_reg.findall(text):
             ch_name = ch_name.strip().replace("#genre#", "")
             link = link.strip()
             ch_low = ch_name.lower()
             print(f"【调试-TXT提取频道】{ch_name}")
-            if ch_low in white_set_lower and not is_incompatible_stream(link):
+            # 过滤#开头的M3U标签行
+            if ch_low in white_set_lower and not is_incompatible_stream(link) and not ch_name.startswith("#"):
                 valid_pair.append((ch_name, link))
-        # m3u8格式匹配规则
         m3u8_reg = re.compile(r"#EXTINF:-1,([^\n]+)\n(http[s]?://[^\n]+)")
         for ch_name, link in m3u8_reg.findall(text):
             ch_name = ch_name.strip()
             link = link.strip()
             ch_low = ch_name.lower()
             print(f"【调试-M3U8提取频道】{ch_name}")
-            if ch_low in white_set_lower and not is_incompatible_stream(link):
+            # 过滤#开头的标签
+            if ch_low in white_set_lower and not is_incompatible_stream(link) and not ch_name.startswith("#"):
                 valid_pair.append((ch_name, link))
     except Exception as e:
         print(f"【调试】源地址 {src_url} 拉取失败，异常详情：{str(e)}")
