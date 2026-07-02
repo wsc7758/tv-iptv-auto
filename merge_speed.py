@@ -82,10 +82,13 @@ def load_white_list() -> tuple[list[str], set[str]]:
     lower_match_set = set()
     with open(WHITE_LIST_FILE, "r", encoding="utf-8") as f:
         for line in f.readlines():
-            name = line.strip()
-            if name and not name.startswith("#"):
-                origin_order.append(name)
-                lower_match_set.add(name.lower())
+            raw_line = line.rstrip("\n")
+            # 全部原始行（注释、空行、频道名）存入origin_order，用于输出排版
+            origin_order.append(raw_line)
+            strip_line = raw_line.strip()
+            # 仅纯频道加入匹配集合，注释/空行跳过匹配
+            if strip_line and not raw_line.startswith("#"):
+                lower_match_set.add(strip_line.lower())
     print(f"【阶段1-白名单加载】基准频道总数量：{len(origin_order)}")
     return origin_order, lower_match_set
 
@@ -154,13 +157,20 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
 # ===================== 阶段3：输出标准化文件 =====================
 def export_result(white_origin: list[str], final_stream_map: dict[str, list[str]]):
     lines = []
-    for ch in white_origin:
-        if ch in final_stream_map and len(final_stream_map[ch]) > 0:
-            for link in final_stream_map[ch]:
-                lines.append(f"{ch},{link}")
+    for item in white_origin:
+        # 分类注释、空白行直接原样写入，实现区块分割
+        if item.startswith("#") or item.strip() == "":
+            lines.append(item)
+            continue
+        ch_name = item.strip()
+        # 有测速有效链接才输出频道+url
+        if ch_name in final_stream_map and len(final_stream_map[ch_name]) > 0:
+            for link in final_stream_map[ch_name]:
+                lines.append(f"{ch_name},{link}")
     with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    print(f"【阶段3-输出完成】最终有效流媒体总条数：{len(lines)}")
+    stream_count = sum(1 for line in lines if "," in line)
+    print(f"【阶段3-输出完成】最终有效流媒体总条数：{stream_count}")
 
 # ===================== 主入口（补齐并发timeout、异常捕获，无语法错误） =====================
 def main():
