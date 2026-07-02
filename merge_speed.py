@@ -149,24 +149,34 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
     total_url = len(all_tasks)
     print(f"【测速预加载】待测速总链接数量：{total_url}")
     batch_size = 40
-    # 分批次执行，避免一次性塞满线程池
+    # 新增：单批次最大允许运行时长（单位秒），超过直接截断本批
+    BATCH_MAX_RUN_SEC = 25
+    # 分批次执行
     for start in range(0, total_url, batch_size):
         batch_urls = all_tasks[start:start+batch_size]
-        print(f"【测速批次】{start+1} ~ {min(start+batch_size, total_url)} / {total_url}")
+        batch_end_idx = min(start + batch_size, total_url)
+        print(f"【测速批次】{start+1} ~ {batch_end_idx} / {total_url}，单批限时{BATCH_MAX_RUN_SEC}秒")
+        # 本批所有任务映射
+        batch_fut_map = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=STREAM_EVAL_WORKERS) as exe:
-            futures = []
             for sub_idx, url in enumerate(batch_urls):
                 real_idx = start + sub_idx
                 fut = exe.submit(stream_quality_detect, url)
-                futures.append((real_idx, fut))
-            for real_idx, fu in futures:
-                try:
-                    delay, res = fu.result(timeout=STREAM_TEST_TIMEOUT)
-                    task_result[real_idx] = (delay, res)
-                except concurrent.futures.TimeoutError:
-                    task_result[real_idx] = (9999, 0)
-                except Exception:
-                    task_result[real_idx] = (9999, 0)
+                batch_fut_map[fut] = real_idx
+            # 带批次总超时遍历任务，超时直接跳出本批
+            try:
+                for fu in concurrent.futures.as_completed(batch_fut_map, timeout=BATCH_MAX_RUN_SEC):
+                    real_idx = batch_fut_map[fu]
+                    try:
+                        delay, res = fu.result(timeout=STREAM_TEST_TIMEOUT)
+                        task_result[real_idx] = (delay, res)
+                    except concurrent.futures.TimeoutError:
+                        task_result[real_idx] = (9999, 0)
+                    except Exception:
+                        task_result[real_idx] = (9999, 0)
+            except concurrent.futures.TimeoutError:
+                # 批次整体超时触发，打印提示，直接结束本批，剩余未跑完链接丢弃
+                print(f"【警告】本批次 {start+1} ~ {batch_end_idx} 运行超过{BATCH_MAX_RUN_SEC}秒，截断，仅保留已完成链接，跳过剩余未测速URL")
     # 按频道分组
     ch_temp = defaultdict(list)
     for idx, ch_name, url in ch_url_index:
