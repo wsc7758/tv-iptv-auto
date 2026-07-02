@@ -241,7 +241,7 @@ def main():
     export_result(white_origin_list, qualified_channel_map)
     print("====== 脚本全部执行完毕 ======")
 
-    # 双重同步+加长休眠兜底
+    # 脚本内部收尾，释放所有资源
     for var in locals().values():
         if hasattr(var, "close") and callable(var.close):
             try:
@@ -249,9 +249,9 @@ def main():
             except Exception:
                 pass
     os.sync()
-    time.sleep(2)
+    time.sleep(3)
     os.sync()
-    time.sleep(5)
+    time.sleep(4)
 
 if __name__ == "__main__":
     main()
