@@ -44,20 +44,24 @@ jobs:
       - name: 执行标准化分拣流水线 merge_speed.py（无缓冲实时日志）
         run: python3 -u merge_speed.py
 
-      # 彻底删除stash，改用安全无交互git逻辑，不会卡死
+      # 新增独立隔离步骤，彻底断开Python进程与git进程资源占用
+      - name: 隔离等待磁盘IO完全落盘释放文件锁
+        run: |
+          sync
+          sleep 6
+
+      # 无stash安全git逻辑，加长sleep+系统sync
       - name: 自动提交更新输出文件tv.txt
         run: |
           git config --global user.name "IPTV-Sort-Bot"
           git config --global user.email "auto-bot@example.com"
-          # 加长等待，给系统充足时间释放文件锁
-          sleep 4
+          sleep 8
+          sync
           git add tv.txt
-          # 检测无更新直接退出，不执行git操作
           if git diff --cached --quiet; then
             echo "tv.txt无更新，跳过提交"
             exit 0
           fi
-          # 安全同步远端，无stash、无rebase冲突
           git fetch origin main
           git reset --hard origin/main
           git add tv.txt
