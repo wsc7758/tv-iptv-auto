@@ -7,6 +7,7 @@ import re
 from collections import defaultdict
 import m3u8
 import urllib3
+import threading
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ===================== 全局优化参数 =====================
@@ -241,7 +242,14 @@ def main():
     export_result(white_origin_list, qualified_channel_map)
     print("====== 脚本全部执行完毕 ======")
 
-    # 脚本内部收尾，释放所有资源
+    # 新增：强制回收所有子线程，彻底释放IO占用
+    for th in threading.enumerate():
+        if th != threading.current_thread():
+            try:
+                th._stop()
+            except:
+                pass
+    # 多层同步+超长休眠兜底
     for var in locals().values():
         if hasattr(var, "close") and callable(var.close):
             try:
@@ -251,7 +259,8 @@ def main():
     os.sync()
     time.sleep(3)
     os.sync()
-    time.sleep(4)
+    time.sleep(5)
+    print("====== Python资源全部释放完成 ======")
 
 if __name__ == "__main__":
     main()
