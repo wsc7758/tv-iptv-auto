@@ -43,34 +43,29 @@ jobs:
 
       - name: 执行分拣+磁盘等待+自动提交
         run: |
-          set -e
+          set -eo pipefail
           echo "===== 1. 启动分拣脚本 ====="
-          # 超时提升至900秒(15分钟)，解决exit code 124超时终止
           timeout 900 python3 -u merge_speed.py
+          echo "分拣脚本执行完毕，进入文件同步"
 
-          echo "===== 2. 强制同步磁盘缓存 ====="
+          # 仅单次磁盘同步，大幅减少IO阻塞概率
           sync
-          echo "等待4秒"
-          sleep 4
-          sync
-          echo "等待6秒"
-          sleep 6
-          sync
-          echo "等待2秒"
-          sleep 2
-          echo "磁盘同步全部完成"
+          echo "磁盘缓存同步完成，等待3秒释放文件锁"
+          sleep 3
+          echo "开始执行git操作"
 
-          echo "===== 3. 开始git提交逻辑 ====="
           git config --global user.name "IPTV-Sort-Bot"
           git config --global user.email "auto-bot@example.com"
           git add tv.txt
           if git diff --cached --quiet; then
-            echo "tv.txt无更新，直接退出"
+            echo "tv.txt无更新，跳过提交，流程结束"
             exit 0
           fi
+          echo "检测到tv.txt更新，拉取远端代码"
           git fetch origin main
           git reset --hard origin/main
           git add tv.txt
           git commit -m "流水线自动更新｜优选测速直播源"
+          echo "推送更新至仓库"
           git push origin main
-          echo "===== 提交完成 ====="
+          echo "===== 全部流程执行完成 ====="
