@@ -12,7 +12,7 @@ import os
 import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 全局最优固定参数，无需再调整
+# 全局最优固定参数，复原批次参数
 SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
@@ -22,6 +22,8 @@ MAX_STREAM_PER_CHANNEL = 3
 SOURCE_FETCH_TIMEOUT = 3
 SOURCE_FETCH_WORKERS = 3
 STREAM_EVAL_WORKERS = 6
+BATCH_MAX_RUN_SEC = 25
+batch_size = 60
 DEBUG_LOG = False
 
 def is_stream_incompatible(url: str) -> bool:
@@ -121,7 +123,7 @@ def fetch_channel_from_source(src_link: str, white_lower_set: set[str]) -> list[
             print(f"【调试】源 {src_link} 拉取异常：{str(e)}", flush=True)
     return result_pairs
 
-# 无批次超时、单任务单独捕获超时，彻底解决卡死无日志
+# 复原：60链接一批、单批次最大25秒超时截断逻辑（之前丢失的核心批次代码完整恢复）
 def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list[str]]:
     final_map = defaultdict(list)
     total_ch = len(channel_raw_map)
@@ -134,19 +136,42 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
             ch_url_index.append((curr_idx, ch_name, url))
             curr_idx += 1
     task_result = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=STREAM_EVAL_WORKERS) as exe:
-        futures = []
-        for idx, url in enumerate(all_tasks):
-            fut = exe.submit(stream_quality_detect, url)
-            futures.append((idx, fut))
-        for idx, fu in futures:
+    total_url = len(all_tasks)
+    print(f"【测速预加载】待测速总链接数量：{total_url}", flush=True)
+
+    # 分批次循环测速，每批60条，单批限时25秒超时截断
+    for start in range(0, total_url, batch_size):
+        batch_urls = all_tasks[start:start+batch_size]
+        batch_end_idx = min(start + batch_size, total_url)
+        print(f"【测速批次】{start+1} ~ {batch_end_idx} / {total_url}，单批限时{BATCH_MAX_RUN_SEC}秒", flush=True)
+        batch_fut_map = {}
+        exe = concurrent.futures.ThreadPoolExecutor(max_workers=STREAM_EVAL_WORKERS)
+        try:
+            for sub_idx, url in enumerate(batch_urls):
+                real_idx = start + sub_idx
+                fut = exe.submit(stream_quality_detect, url)
+                batch_fut_map[fut] = real_idx
             try:
-                delay, res = fu.result(timeout=0.8)
-                task_result[idx] = (delay, res)
+                # 整批25秒超时兜底
+                for fu in concurrent.futures.as_completed(batch_fut_map, timeout=BATCH_MAX_RUN_SEC):
+                    real_idx = batch_fut_map[fu]
+                    try:
+                        delay, res = fu.result(timeout=STREAM_TEST_TIMEOUT)
+                        task_result[real_idx] = (delay, res)
+                    except concurrent.futures.TimeoutError:
+                        task_result[real_idx] = (9999, 0)
+                    except Exception:
+                        task_result[real_idx] = (9999, 0)
             except concurrent.futures.TimeoutError:
-                task_result[idx] = (9999, 0)
-            except Exception:
-                task_result[idx] = (9999, 0)
+                print(f"【警告】本批次 {start+1} ~ {batch_end_idx} 运行超过{BATCH_MAX_RUN_SEC}秒，截断，仅保留已完成链接，跳过剩余未测速URL", flush=True)
+                # 取消所有未完成任务，释放线程
+                for fut in batch_fut_map:
+                    if not fut.done():
+                        fut.cancel()
+        finally:
+            exe.shutdown(wait=False)
+
+    # 按频道分组排序
     ch_temp = defaultdict(list)
     for idx, ch_name, url in ch_url_index:
         delay, res = task_result.get(idx, (9999, 0))
@@ -172,10 +197,9 @@ def export_result(white_origin: list[str], final_stream_map: dict[str, list[str]
                 lines.append(f"{ch_name},{link}")
     with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-        # 新增：写入当前时间戳，强制文件内容每次不同，git识别变更
+        # 时间戳强制变更文件，解决git无更新看不到tv.txt
         f.write(f"\n# 流水线自动生成更新时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         f.flush()
-    # 强制磁盘落盘，确保tv.txt写入物理磁盘
     os.sync()
     stream_count = sum(1 for line in lines if "," in line)
     print(f"【阶段3-输出完成】最终有效流媒体总条数：{stream_count}", flush=True)
