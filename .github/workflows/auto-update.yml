@@ -28,9 +28,10 @@ jobs:
           echo "LANG=en_US.UTF-8" >> $GITHUB_ENV
           echo "PYTHONIOENCODING=utf-8" >> $GITHUB_ENV
 
-      # 稳定配置国内阿里DNS，防止被系统重置
+      # 修复：先自动创建目录再写入DNS配置，避免文件不存在报错
       - name: 配置国内公共DNS，优化国内源访问
         run: |
+          sudo mkdir -p /etc/systemd/resolved.conf.d
           echo "nameserver 223.5.5.5" | sudo tee /etc/systemd/resolved.conf.d/dns.conf
           sudo systemctl restart systemd-resolved
 
