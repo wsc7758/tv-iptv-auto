@@ -16,13 +16,13 @@ SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
 # 缩短单链接测速超时，快速放弃死链
-STREAM_TEST_TIMEOUT = 1.2
+STREAM_TEST_TIMEOUT = 0.8
 MIN_VERTICAL_RES = 1080
 MAX_STREAM_PER_CHANNEL = 3
 SOURCE_FETCH_TIMEOUT = 3
 # 拉源线程不变，测速线程适度提升（容器多核利用）
 SOURCE_FETCH_WORKERS = 3
-STREAM_EVAL_WORKERS = 10
+STREAM_EVAL_WORKERS = 6
 DEBUG_LOG = False
 
 # ===================== 底层工具函数【核心提速修复】 =====================
@@ -147,7 +147,7 @@ def fetch_channel_from_source(src_link: str, white_lower_set: set[str]) -> list[
 def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list[str]]:
     final_map = defaultdict(list)
     total_ch = len(channel_raw_map)
-    # 1. 扁平化所有(频道,链接)对，全局一次性并发，不再一个频道测完再下一个
+    # 扁平化所有(频道,链接)对
     all_tasks = []
     ch_url_index = []
     curr_idx = 0
@@ -157,28 +157,30 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
             ch_url_index.append((curr_idx, ch_name, url))
             curr_idx += 1
 
-    # 2. 全部链接统一并发测速，最大化利用线程池【红色改动：新增双层超时防护】
     task_result = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=STREAM_EVAL_WORKERS) as exe:
-        futures_map = {exe.submit(stream_quality_detect, url): idx for idx, url in enumerate(all_tasks)}
-        # ↓↓↓【改动1】外层as_completed增加全局单批超时0.8s
-        for fu in concurrent.futures.as_completed(futures_map, timeout=0.8):
-            idx = futures_map[fu]
+        futures = []
+        # 提交全部测速任务
+        for idx, url in enumerate(all_tasks):
+            fut = exe.submit(stream_quality_detect, url)
+            futures.append((idx, fut))
+        # 逐个等待任务，仅给单个任务设置超时，不设批次总超时
+        for idx, fu in futures:
             try:
-                # ↓↓↓【改动2】获取结果时增加单任务超时捕获
                 delay, res = fu.result(timeout=0.8)
                 task_result[idx] = (delay, res)
             except concurrent.futures.TimeoutError:
-                # ↓↓↓【改动3】超时链接直接标记为极差，不阻塞线程
+                # 单链接超时直接标记为极差流
+                task_result[idx] = (9999, 0)
+            except Exception:
                 task_result[idx] = (9999, 0)
 
-    # 3. 按频道分组、排序、截取TOP3（原有优先级/延迟/分辨率逻辑完全保留）
+    # 按频道分组排序
     ch_temp = defaultdict(list)
     for idx, ch_name, url in ch_url_index:
         delay, res = task_result.get(idx, (9999, 0))
         ch_temp[ch_name].append((url, get_stream_priority(url), delay, -res))
 
-    # 排序规则不变：优先级>延迟>分辨率
     curr = 0
     for ch_name, eval_res in ch_temp.items():
         curr += 1
