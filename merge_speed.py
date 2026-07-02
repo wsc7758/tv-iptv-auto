@@ -149,21 +149,18 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
     total_url = len(all_tasks)
     print(f"【测速预加载】待测速总链接数量：{total_url}")
     batch_size = 40
-    # 新增：单批次最大允许运行时长（单位秒），超过直接截断本批
-    BATCH_MAX_RUN_SEC = 25
-    # 分批次执行
+    BATCH_MAX_RUN_SEC = 40
     for start in range(0, total_url, batch_size):
         batch_urls = all_tasks[start:start+batch_size]
         batch_end_idx = min(start + batch_size, total_url)
         print(f"【测速批次】{start+1} ~ {batch_end_idx} / {total_url}，单批限时{BATCH_MAX_RUN_SEC}秒")
-        # 本批所有任务映射
         batch_fut_map = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=STREAM_EVAL_WORKERS) as exe:
+        exe = concurrent.futures.ThreadPoolExecutor(max_workers=STREAM_EVAL_WORKERS)
+        try:
             for sub_idx, url in enumerate(batch_urls):
                 real_idx = start + sub_idx
                 fut = exe.submit(stream_quality_detect, url)
                 batch_fut_map[fut] = real_idx
-            # 带批次总超时遍历任务，超时直接跳出本批
             try:
                 for fu in concurrent.futures.as_completed(batch_fut_map, timeout=BATCH_MAX_RUN_SEC):
                     real_idx = batch_fut_map[fu]
@@ -175,14 +172,18 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
                     except Exception:
                         task_result[real_idx] = (9999, 0)
             except concurrent.futures.TimeoutError:
-                # 批次整体超时触发，打印提示，直接结束本批，剩余未跑完链接丢弃
                 print(f"【警告】本批次 {start+1} ~ {batch_end_idx} 运行超过{BATCH_MAX_RUN_SEC}秒，截断，仅保留已完成链接，跳过剩余未测速URL")
+                # 关键修复：取消所有未完成任务，线程池不再阻塞等待
+                for fut in batch_fut_map:
+                    if not fut.done():
+                        fut.cancel()
+        finally:
+            exe.shutdown(wait=False)
     # 按频道分组
     ch_temp = defaultdict(list)
     for idx, ch_name, url in ch_url_index:
         delay, res = task_result.get(idx, (9999, 0))
         ch_temp[ch_name].append((url, get_stream_priority(url), delay, -res))
-    # 排序：咪咕/央视优先 > 分辨率优先 > 延迟靠后
     curr = 0
     for ch_name, eval_res in ch_temp.items():
         curr += 1
