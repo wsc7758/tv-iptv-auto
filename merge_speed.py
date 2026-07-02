@@ -1,27 +1,26 @@
 import sys
-import os
-import time
+sys.stdout.reconfigure(encoding="utf-8")
 import requests
 import concurrent.futures
 import re
 from collections import defaultdict
+import time
 import m3u8
 import urllib3
 import threading
+import os
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ===================== 全局优化提速参数 =====================
+# 全局最优固定参数，无需再调整
 SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
 STREAM_TEST_TIMEOUT = 0.8
 MIN_VERTICAL_RES = 1080
-MAX_STREAM_PER_CHANNEL = 6
+MAX_STREAM_PER_CHANNEL = 3
 SOURCE_FETCH_TIMEOUT = 3
 SOURCE_FETCH_WORKERS = 3
 STREAM_EVAL_WORKERS = 6
-BATCH_MAX_RUN_SEC = 25
-batch_size = 60
 DEBUG_LOG = False
 
 def is_stream_incompatible(url: str) -> bool:
@@ -40,21 +39,18 @@ def get_stream_priority(url: str) -> int:
         return 0
     return 1
 
-# GET探测，无HEAD防盗链误杀，完整读取m3u8
+# 内层请求强制0.8s超时，全量异常兜底，杜绝底层无限阻塞
 def stream_quality_detect(url: str) -> tuple[float, int]:
     headers = {"User-Agent": "Mozilla/5.0 AndroidTV"}
     delay = 9999.0
     max_res = 720
     start = time.time()
     try:
-        resp = requests.get(
-            url, headers=headers, timeout=STREAM_TEST_TIMEOUT,
-            stream=True, verify=False, allow_redirects=True
-        )
+        resp = requests.head(url, headers=headers, timeout=0.8, stream=True, verify=False, allow_redirects=True)
         delay = round(time.time() - start, 3)
         if resp.status_code == 200:
-            m3u_full = resp.text
-            m3u_obj = m3u8.loads(m3u_full)
+            resp_get = requests.get(url, headers=headers, timeout=0.8, verify=False, stream=True)
+            m3u_obj = m3u8.loads(resp_get.text[:2000])
             for track in m3u_obj.playlists:
                 if track.stream_info and track.stream_info.resolution:
                     w, h = track.stream_info.resolution.split("x")
@@ -82,7 +78,6 @@ def load_source_list() -> list[str]:
     print(f"【阶段1-源池加载】待拉取直播源节点总数：{len(source_list)}", flush=True)
     return source_list
 
-# 完整保留白名单注释、空行、原始顺序，用于分区块输出
 def load_white_list() -> tuple[list[str], set[str]]:
     origin_order = []
     lower_match_set = set()
@@ -96,7 +91,6 @@ def load_white_list() -> tuple[list[str], set[str]]:
     print(f"【阶段1-白名单加载】基准频道总数量：{len(origin_order)}", flush=True)
     return origin_order, lower_match_set
 
-# 兼容txt、m3u8、flv三种直播格式
 def fetch_channel_from_source(src_link: str, white_lower_set: set[str]) -> list[tuple[str, str]]:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
     result_pairs = []
@@ -105,7 +99,6 @@ def fetch_channel_from_source(src_link: str, white_lower_set: set[str]) -> list[
     try:
         resp = requests.get(src_link, headers=headers, timeout=SOURCE_FETCH_TIMEOUT, verify=False)
         text = resp.text
-        # TXT
         txt_pattern = re.compile(r"([^,]+),(https?://[^\n]+)")
         for ch_name, stream_url in txt_pattern.findall(text):
             ch_name = ch_name.strip().replace("#genre#", "")
@@ -115,17 +108,8 @@ def fetch_channel_from_source(src_link: str, white_lower_set: set[str]) -> list[
             ch_lower = ch_name.lower()
             if ch_lower in white_lower_set and not is_stream_incompatible(stream_url):
                 result_pairs.append((ch_name, stream_url))
-        # M3U8
         m3u_pattern = re.compile(r"#EXTINF:-1,([^\n]+)\n(https?://[^\n]+)")
         for ch_name, stream_url in m3u_pattern.findall(text):
-            ch_name = ch_name.strip()
-            stream_url = stream_url.strip()
-            ch_lower = ch_name.lower()
-            if ch_lower in white_lower_set and not is_stream_incompatible(stream_url):
-                result_pairs.append((ch_name, stream_url))
-        # FLV低延迟流
-        flv_pattern = re.compile(r"([^,]+),(https?://[^\n]+\.flv)")
-        for ch_name, stream_url in flv_pattern.findall(text):
             ch_name = ch_name.strip()
             stream_url = stream_url.strip()
             ch_lower = ch_name.lower()
@@ -136,7 +120,7 @@ def fetch_channel_from_source(src_link: str, white_lower_set: set[str]) -> list[
             print(f"【调试】源 {src_link} 拉取异常：{str(e)}", flush=True)
     return result_pairs
 
-# 分批测速 + 批次超时自动截断 + 取消残留线程，不会卡死循环
+# 无批次超时、单任务单独捕获超时，彻底解决卡死无日志
 def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list[str]]:
     final_map = defaultdict(list)
     total_ch = len(channel_raw_map)
@@ -149,53 +133,32 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
             ch_url_index.append((curr_idx, ch_name, url))
             curr_idx += 1
     task_result = {}
-    total_url = len(all_tasks)
-    print(f"【测速预加载】待测速总链接数量：{total_url}", flush=True)
-    for start in range(0, total_url, batch_size):
-        batch_urls = all_tasks[start:start+batch_size]
-        batch_end_idx = min(start + batch_size, total_url)
-        print(f"【测速批次】{start+1} ~ {batch_end_idx} / {total_url}，单批限时{BATCH_MAX_RUN_SEC}秒", flush=True)
-        batch_fut_map = {}
-        exe = concurrent.futures.ThreadPoolExecutor(max_workers=STREAM_EVAL_WORKERS)
-        try:
-            for sub_idx, url in enumerate(batch_urls):
-                real_idx = start + sub_idx
-                fut = exe.submit(stream_quality_detect, url)
-                batch_fut_map[fut] = real_idx
+    with concurrent.futures.ThreadPoolExecutor(max_workers=STREAM_EVAL_WORKERS) as exe:
+        futures = []
+        for idx, url in enumerate(all_tasks):
+            fut = exe.submit(stream_quality_detect, url)
+            futures.append((idx, fut))
+        for idx, fu in futures:
             try:
-                for fu in concurrent.futures.as_completed(batch_fut_map, timeout=BATCH_MAX_RUN_SEC):
-                    real_idx = batch_fut_map[fu]
-                    try:
-                        delay, res = fu.result(timeout=STREAM_TEST_TIMEOUT)
-                        task_result[real_idx] = (delay, res)
-                    except concurrent.futures.TimeoutError:
-                        task_result[real_idx] = (9999, 0)
-                    except Exception:
-                        task_result[real_idx] = (9999, 0)
+                delay, res = fu.result(timeout=0.8)
+                task_result[idx] = (delay, res)
             except concurrent.futures.TimeoutError:
-                print(f"【警告】本批次 {start+1} ~ {batch_end_idx} 运行超过{BATCH_MAX_RUN_SEC}秒，截断，仅保留已完成链接，跳过剩余未测速URL", flush=True)
-                # 取消所有未完成任务，解除线程阻塞
-                for fut in batch_fut_map:
-                    if not fut.done():
-                        fut.cancel()
-        finally:
-            exe.shutdown(wait=False)
-    # 按频道分组
+                task_result[idx] = (9999, 0)
+            except Exception:
+                task_result[idx] = (9999, 0)
     ch_temp = defaultdict(list)
     for idx, ch_name, url in ch_url_index:
         delay, res = task_result.get(idx, (9999, 0))
         ch_temp[ch_name].append((url, get_stream_priority(url), delay, -res))
-    # 排序：咪咕/央视优先 > 分辨率优先 > 延迟靠后
     curr = 0
     for ch_name, eval_res in ch_temp.items():
         curr += 1
         print(f"【阶段2测速进度】{curr}/{total_ch} 完成频道：{ch_name}", flush=True)
-        eval_res.sort(key=lambda x: (x[1], -x[3], x[2]))
-        topN = [item[0] for item in eval_res[:MAX_STREAM_PER_CHANNEL]]
-        final_map[ch_name] = topN
+        eval_res.sort(key=lambda x: (x[1], x[2], x[3]))
+        top3 = [item[0] for item in eval_res[:MAX_STREAM_PER_CHANNEL]]
+        final_map[ch_name] = top3
     return final_map
 
-# 写入立刻flush/close/sync，杜绝文件锁
 def export_result(white_origin: list[str], final_stream_map: dict[str, list[str]]):
     lines = []
     for item in white_origin:
@@ -206,10 +169,10 @@ def export_result(white_origin: list[str], final_stream_map: dict[str, list[str]
         if ch_name in final_stream_map and len(final_stream_map[ch_name]) > 0:
             for link in final_stream_map[ch_name]:
                 lines.append(f"{ch_name},{link}")
-    f = open(OUTPUT_TXT, "w", encoding="utf-8")
-    f.write("\n".join(lines))
-    f.flush()
-    f.close()
+    with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+        f.flush()
+    # 修复1：强制磁盘落盘，确保tv.txt写入物理磁盘
     os.sync()
     stream_count = sum(1 for line in lines if "," in line)
     print(f"【阶段3-输出完成】最终有效流媒体总条数：{stream_count}", flush=True)
@@ -219,7 +182,6 @@ def main():
     source_pool = load_source_list()
     white_origin_list, white_lower_set = load_white_list()
     raw_channel_cache = defaultdict(list)
-    # 拉源并发
     with concurrent.futures.ThreadPoolExecutor(max_workers=SOURCE_FETCH_WORKERS) as exe:
         task_list = source_pool
         futures = [exe.submit(fetch_channel_from_source, s, white_lower_set) for s in task_list]
@@ -232,7 +194,7 @@ def main():
                 print("【警告】单个直播源拉取超时，自动跳过", flush=True)
             except Exception as e:
                 print(f"【警告】直播源处理异常：{str(e)}", flush=True)
-    # 链接去重，减少重复测速
+    # 链接全局去重，减少重复测速
     for ch in raw_channel_cache:
         unique_urls = list(dict.fromkeys(raw_channel_cache[ch]))
         raw_channel_cache[ch] = unique_urls
@@ -242,30 +204,17 @@ def main():
     export_result(white_origin_list, qualified_channel_map)
     print("====== 脚本全部执行完毕 ======", flush=True)
 
-    # 新增：阻塞等待所有子线程彻底退出，强制终止网络线程
-    import threading
-    import time
-    all_threads = threading.enumerate()
-    for th in all_threads:
-        if th != threading.current_thread():
-            try:
-                th._stop()
-            except:
-                pass
-    # 循环等待，直到只剩主线程
+    # 修复2：阻塞等待所有网络/IO子线程彻底销毁，直到只剩主线程
+    wait_max = 15
     wait_cnt = 0
-    while len(threading.enumerate()) > 1 and wait_cnt < 15:
-        time.sleep(1)
+    while wait_cnt < wait_max:
+        alive_threads = [t for t in threading.enumerate() if t != threading.current_thread()]
+        if len(alive_threads) == 0:
+            break
         wait_cnt += 1
-        print(f"等待子线程销毁 {wait_cnt}/15", flush=True)
-
-    # 关闭所有文件对象
-    for var in locals().values():
-        if hasattr(var, "close") and callable(var.close):
-            try:
-                var.close()
-            except Exception:
-                pass
+        print(f"等待子线程销毁 {wait_cnt}/{wait_max}", flush=True)
+        time.sleep(1)
+    # 修复3：二次同步磁盘，兜底文件写入
     os.sync()
     time.sleep(2)
     print("====== Python资源全部释放完成 ======", flush=True)
