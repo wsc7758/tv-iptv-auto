@@ -49,6 +49,8 @@ jobs:
         run: |
           git config --global user.name "IPTV-Sort-Bot"
           git config --global user.email "auto-bot@example.com"
+          # 等待文件IO完全释放
+          sleep 3
           git add tv.txt
           git stash push -m "auto temp tv"
           git pull --rebase origin main
