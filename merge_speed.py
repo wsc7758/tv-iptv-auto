@@ -19,7 +19,7 @@ MAX_STREAM_PER_CHANNEL = 6
 SOURCE_FETCH_TIMEOUT = 3
 SOURCE_FETCH_WORKERS = 3
 STREAM_EVAL_WORKERS = 4
-BATCH_MAX_RUN_SEC = 25
+BATCH_MAX_RUN_SEC = 40
 batch_size = 40
 DEBUG_LOG = False
 
@@ -194,7 +194,7 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
         final_map[ch_name] = topN
     return final_map
 
-# 【核心修复】写入时立刻flush、close、os.sync，杜绝文件锁阻塞git
+# 写入立刻flush/close/sync，杜绝文件锁
 def export_result(white_origin: list[str], final_stream_map: dict[str, list[str]]):
     lines = []
     for item in white_origin:
@@ -205,12 +205,11 @@ def export_result(white_origin: list[str], final_stream_map: dict[str, list[str]
         if ch_name in final_stream_map and len(final_stream_map[ch_name]) > 0:
             for link in final_stream_map[ch_name]:
                 lines.append(f"{ch_name},{link}")
-    # 单独文件句柄，写完强制刷新、关闭、同步磁盘
     f = open(OUTPUT_TXT, "w", encoding="utf-8")
     f.write("\n".join(lines))
-    f.flush()    # 清空内存缓冲区
-    f.close()    # 立刻释放文件句柄
-    os.sync()    # 强制写入物理磁盘
+    f.flush()
+    f.close()
+    os.sync()
     stream_count = sum(1 for line in lines if "," in line)
     print(f"【阶段3-输出完成】最终有效流媒体总条数：{stream_count}")
 
@@ -242,7 +241,7 @@ def main():
     export_result(white_origin_list, qualified_channel_map)
     print("====== 脚本全部执行完毕 ======")
 
-    # 二次兜底：释放剩余文件句柄、同步磁盘、休眠缓冲
+    # 双重同步+加长休眠兜底
     for var in locals().values():
         if hasattr(var, "close") and callable(var.close):
             try:
@@ -251,6 +250,8 @@ def main():
                 pass
     os.sync()
     time.sleep(2)
+    os.sync()
+    time.sleep(5)
 
 if __name__ == "__main__":
     main()
