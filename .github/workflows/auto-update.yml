@@ -45,10 +45,10 @@ jobs:
         run: |
           set -eo pipefail
           echo "===== 1. 启动分拣脚本 ====="
-          timeout 900 python3 -u merge_speed.py
+          # PYTHONUNBUFFERED=1 全局强制无缓冲输出，彻底清空管道缓存
+          PYTHONUNBUFFERED=1 timeout 900 python3 merge_speed.py
           echo "分拣脚本执行完毕，进入文件同步"
 
-          # 仅单次磁盘同步，大幅减少IO阻塞概率
           sync
           echo "磁盘缓存同步完成，等待3秒释放文件锁"
           sleep 3
