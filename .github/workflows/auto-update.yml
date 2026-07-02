@@ -41,31 +41,35 @@ jobs:
       - name: 列出当前目录文件校验
         run: ls -la
 
-      - name: 执行分拣+磁盘等待+自动提交
+      # 拆分两段：python单独timeout；磁盘+git独立timeout，全程高频输出日志
+      - name: 仅执行分拣脚本
+        run: |
+          PYTHONUNBUFFERED=1 timeout 900 python3 merge_speed.py
+          echo "====分拣脚本执行完毕，文件已生成===="
+
+      - name: 磁盘同步+git提交（单独60秒超时，每步打印日志）
+        timeout-minutes: 2
         run: |
           set -eo pipefail
-          echo "===== 1. 启动分拣脚本 ====="
-          PYTHONUNBUFFERED=1 timeout 900 python3 merge_speed.py
-          echo "分拣脚本执行完毕，进入文件同步"
-
+          echo "1. 开始磁盘同步"
           sync
-          echo "磁盘缓存同步完成，等待3秒释放文件锁"
+          echo "2. 等待3秒释放文件锁"
           sleep 3
-          echo "开始执行git操作"
-
+          echo "3. 配置git用户"
           git config --global user.name "IPTV-Sort-Bot"
           git config --global user.email "auto-bot@example.com"
           git add tv.txt
-          # 先判断是否存在变更
+          echo "4. 判断文件是否变更"
           if git diff --cached --quiet; then
-            echo "tv.txt无更新，跳过提交，流程正常结束"
+            echo "无更新，正常结束"
             exit 0
           fi
-          echo "检测到tv.txt更新，拉取远端代码"
+          echo "5. 拉取远端代码"
           git fetch origin main
           git reset --hard origin/main
           git add tv.txt
+          echo "6. 提交文件"
           git commit -m "流水线自动更新｜优选流媒体列表" || true
-          echo "推送更新至仓库"
+          echo "7. 推送仓库"
           git push origin main
-          echo "===== 全部流程执行完成 ====="
+          echo "====全部流程执行成功===="
