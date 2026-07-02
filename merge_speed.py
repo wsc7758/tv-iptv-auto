@@ -12,7 +12,7 @@ import os
 import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 全局参数：恢复分批配置
+# 全局分批参数完整保留
 SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
@@ -42,7 +42,7 @@ def get_stream_priority(url: str) -> int:
         return 0
     return 1
 
-# 内层请求强制0.8s超时，全量异常兜底，杜绝底层无限阻塞
+# 内层请求0.8秒单链接超时
 def stream_quality_detect(url: str) -> tuple[float, int]:
     headers = {"User-Agent": "Mozilla/5.0 AndroidTV"}
     delay = 9999.0
@@ -123,7 +123,7 @@ def fetch_channel_from_source(src_link: str, white_lower_set: set[str]) -> list[
             print(f"【调试】源 {src_link} 拉取异常：{str(e)}", flush=True)
     return result_pairs
 
-# 完整保留：60链接一批、单批最大25秒超时，超时保留已测速完成链接、丢弃未跑完链接
+# 60链接一批、25秒批次超时，超时保留已测速链接逻辑完整保留
 def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list[str]]:
     final_map = defaultdict(list)
     total_ch = len(channel_raw_map)
@@ -139,7 +139,6 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
     total_url = len(all_tasks)
     print(f"【测速预加载】待测速总链接数量：{total_url}", flush=True)
 
-    # 分批循环测速逻辑完整保留
     for start in range(0, total_url, batch_size):
         batch_urls = all_tasks[start:start + batch_size]
         batch_end_idx = min(start + batch_size, total_url)
@@ -151,7 +150,6 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
                 real_idx = start + sub_idx
                 fut = exe.submit(stream_quality_detect, url)
                 batch_fut_map[fut] = real_idx
-            # 整批25秒超时控制
             try:
                 for fu in concurrent.futures.as_completed(batch_fut_map, timeout=BATCH_MAX_RUN_SEC):
                     real_idx = batch_fut_map[fu]
@@ -163,7 +161,6 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
                     except Exception:
                         task_result[real_idx] = (9999, 0)
             except concurrent.futures.TimeoutError:
-                # 批次超时：仅保留已完成测速链接，取消剩余未执行任务
                 print(f"【警告】本批次 {start+1} ~ {batch_end_idx} 运行超过{BATCH_MAX_RUN_SEC}秒，截断，仅保留已完成链接，跳过剩余未测速URL", flush=True)
                 for fut in batch_fut_map:
                     if not fut.done():
@@ -196,10 +193,10 @@ def export_result(white_origin: list[str], final_stream_map: dict[str, list[str]
                 lines.append(f"{ch_name},{link}")
     with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-        # 写入时间戳，每次文件内容变化，git识别更新并推送
+        # 写入时间戳，保证每次文件内容变更，git可提交
         f.write(f"\n# 流水线自动生成更新时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         f.flush()
-    # 强制磁盘落盘，确保本地一定生成tv.txt
+    # 强制磁盘落盘
     os.sync()
     stream_count = sum(1 for line in lines if "," in line)
     print(f"【阶段3-输出完成】最终有效流媒体总条数：{stream_count}", flush=True)
@@ -221,7 +218,7 @@ def main():
                 print("【警告】单个直播源拉取超时，自动跳过", flush=True)
             except Exception as e:
                 print(f"【警告】直播源处理异常：{str(e)}", flush=True)
-    # 链接全局去重，减少重复测速
+    # 链接全局去重
     for ch in raw_channel_cache:
         unique_urls = list(dict.fromkeys(raw_channel_cache[ch]))
         raw_channel_cache[ch] = unique_urls
@@ -231,7 +228,7 @@ def main():
     export_result(white_origin_list, qualified_channel_map)
     print("====== 脚本全部执行完毕 ======", flush=True)
 
-    # 等待所有网络子线程销毁，解决Actions卡住不跳转下一阶段（和你截图日志匹配）
+    # 1. Python层线程等待15秒
     wait_max = 15
     wait_cnt = 0
     while wait_cnt < wait_max:
@@ -241,7 +238,11 @@ def main():
         wait_cnt += 1
         print(f"等待子线程销毁 {wait_cnt}/{wait_max}", flush=True)
         time.sleep(1)
-    # 二次磁盘同步兜底，防止文件缓存未写入
+
+    # 2. 新增：强制清空urllib3底层连接池，释放C层网络线程（解决进程挂死核心）
+    http_pool = urllib3.PoolManager()
+    http_pool.clear()
+    # 二次磁盘同步兜底
     os.sync()
     time.sleep(2)
     print("====== Python资源全部释放完成 ======", flush=True)
