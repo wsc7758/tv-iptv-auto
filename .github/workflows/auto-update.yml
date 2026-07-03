@@ -21,10 +21,9 @@ jobs:
           pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install requests
 
-      - name: 执行分拣测速脚本，生成tv.txt
+      - name: 执行分拣测速脚本，生成全新tv.txt
         timeout-minutes: 13
         run: |
-          # 校验当前脚本内单频道最大流参数，排查是否加载旧代码
           PYTHONUNBUFFERED=1 python3 -c "import merge_speed; print('【运行校验】MAX_STREAM_PER_CHANNEL =', merge_speed.MAX_STREAM_PER_CHANNEL)"
           PYTHONUNBUFFERED=1 python3 merge_speed.py
           sync
@@ -41,24 +40,21 @@ jobs:
             fi
           done
           sync
-          echo "所有Python进程完全退出，本步骤结束"
+          echo "所有Python进程完全退出，全新tv.txt已生成"
+          # 在本次新生成文件末尾追加时间戳，制造提交变更
+          now=$(date "+%Y-%m-%d %H:%M:%S")
+          echo -e "\n# 流水线自动刷新时间：${now}" >> tv.txt
 
-      - name: 提交推送tv.txt文件（强制刷新时间，必推送）
+      - name: 提交推送tv.txt文件（保留分拣生成的全新文件）
         timeout-minutes: 3
         run: |
           set -eo pipefail
           sync
           git config --global user.name "wsc7758"
           git config --global user.email "xxx@shturl."
-
+          # 仅拉取远端，不重置覆盖本地新文件
           git fetch origin main
-          git reset --hard origin/main
-          sync
-
-          now=$(date "+%Y-%m-%d %H:%M:%S")
-          echo -e "\n# 流水线自动刷新时间：${now}" >> tv.txt
-
           git add tv.txt
           git commit -m "流水线自动更新｜优选流媒体列表 强制刷新文件时间戳"
           git push origin main
-          echo "文件强制推送完成，仓库tv.txt修改时间已更新"
+          echo "全新分拣后的tv.txt已推送至仓库"
