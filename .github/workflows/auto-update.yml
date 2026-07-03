@@ -42,21 +42,24 @@ jobs:
           sync
           echo "所有Python进程完全退出，本步骤结束"
 
-      - name: 提交推送tv.txt文件
+      - name: 提交推送tv.txt文件（强制刷新时间，必推送）
         timeout-minutes: 3
         run: |
           set -eo pipefail
           sync
           git config --global user.name "wsc7758"
           git config --global user.email "xxx@shturl."
-          git add tv.txt
-          if git diff --cached --quiet >/dev/null 2>&1; then
-            echo "tv.txt无内容更新，任务正常结束"
-            exit 0
-          fi
+
+          # 同步线上最新代码
           git fetch origin main
           git reset --hard origin/main
+          sync
+
+          # 强制写入全新时间戳，保证文件一定产生变更
+          now=$(date "+%Y-%m-%d %H:%M:%S")
+          echo -e "\n# 流水线自动刷新时间：${now}" >> tv.txt
+
           git add tv.txt
-          git commit -m "流水线自动更新｜优选流媒体列表"
+          git commit -m "流水线自动更新｜优选流媒体列表 强制刷新文件时间戳"
           git push origin main
-          echo "文件推送仓库完成"
+          echo "文件强制推送完成，仓库tv.txt修改时间已更新"
