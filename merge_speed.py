@@ -1,39 +1,39 @@
 导入系统
-sys.stdout.reconfigure(encoding="utf-8")
-import requests
-import concurrent.futures
-import re
-from collections import defaultdict
-import time
-import m3u8
-import urllib3
-import os
-import datetime
+sys.stdout.reconfigure(encoding='utf-8')stdout.reconfigure(encoding="utf-8")
+导入 requests requests
+导入concurrent.futures concurrent.futures
+导入正则表达式模块 re
+从集合中导入默认字典 collections import defaultdict
+导入时间 time
+导入m3u8 m3u8
+导入urllib3 urllib3
+导入操作系统模块 os
+导入日期时间 datetime
 
 # 全局禁用连接池长连接，强制每次请求销毁socket
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-def no_reuse_conn(self, timeout=None):
-    return self._new_conn()
-urllib3.connectionpool.ConnectionPool._get_conn = no_reuse_conn
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def no_reuse_conn(self, timeout=None): no_reuse_conn(self, timeout=None):
+    返回 self._new_conn()return self._new_conn()
+urllib3.connectionpool.ConnectionPool._get_conn = 不重复使用连接connectionpool.ConnectionPool._get_conn = no_reuse_conn
 
 # 全局参数
-SOURCE_FILE = "sources.txt"
-WHITE_LIST_FILE = "channel_whitelist.txt"
-OUTPUT_TXT = "tv.txt"
-STREAM_REQ_TIMEOUT = 11
-任务全局超时 = 1212
-BATCH_GLOBAL_TIMEOUT = 2525
-最小垂直分辨率 = 10801080
-每个通道的最大流数 = 33
-SOURCE_FETCH_TIMEOUT = 33
-SOURCE_FETCH_WORKERS = 33
-STREAM EVAL 工作人员 = 1212
-批次大小 = 6060
+SOURCE_FILE = "sources.txt""sources.txt"
+WHITELIST_FILE = "channel_whitelist.txt""channel_whitelist.txt"
+OUTPUT_TXT = "tv.txt""tv.txt"
+STREAM_REQ_TIMEOUT = 1111
+任务全局超时 = 12121212
+BATCH_GLOBAL_TIMEOUT = 25252525
+最小垂直分辨率 = 1080108010801080
+每个通道的最大流数 = 3333
+SOURCE_FETCH_TIMEOUT = 3333
+SOURCE_FETCH_WORKERS = 3333
+STREAM_EVAL_WORKER = 1212
+批次大小 = 60606060
 DEBUG_LOG = 假False
 
-def is_stream_incompatible(url: str) -> bool: is_stream_incompatible(url: str) -> bool:
-    ban_list = {'127.', '192.168.', '10.', '172.', 'localhost', 'rtmp://', 'igmp://'}{"127.", "192.168.", "10.", "172.", "localhost", "rtmp://", "igmp://"}
-    lower_url = url.lower()lower()
+定义是否流不兼容（url: str） -> bool: 是流不兼容（url: str） -> bool: is_stream_incompatible(url: str) -> bool: is_stream_incompatible(url: str) -> bool:
+    ban_list = {'127.', '192.168.', '10.', '172.', 'localhost', 'rtmp://', 'igmp://'}{"127.", "192.168.", "10.", "172.", "localhost", "rtmp://", "igmp://"}{'127.', '192.168.', '10.', '172.', 'localhost', 'rtmp://', 'igmp://'}{"127.", "192.168.", "10.", "172.", "localhost", "rtmp://", "igmp://"}
+    lower_url = url.lower()lower()lower()
     return any(key in lower_url for key in ban_list)
 
 def get_stream_priority(url: str) -> int:
