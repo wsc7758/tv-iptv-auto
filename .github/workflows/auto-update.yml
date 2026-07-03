@@ -24,6 +24,8 @@ jobs:
       - name: 执行分拣测速脚本，生成tv.txt
         timeout-minutes: 13
         run: |
+          # 校验当前脚本内单频道最大流参数，排查是否加载旧代码
+          PYTHONUNBUFFERED=1 python3 -c "import merge_speed; print('【运行校验】MAX_STREAM_PER_CHANNEL =', merge_speed.MAX_STREAM_PER_CHANNEL)"
           PYTHONUNBUFFERED=1 python3 merge_speed.py
           sync
           echo "Python业务执行完毕，等待所有python进程彻底销毁"
@@ -32,7 +34,6 @@ jobs:
             sleep 1
             WAIT_KILL=$((WAIT_KILL+1))
             echo "检测到残留python进程，继续等待回收..."
-            # 等待90秒仍未退出，强制杀进程放行下一步
             if [ $WAIT_KILL -ge 90 ]; then
               pkill -f "python3 merge_speed.py" || true
               echo "等待超时，强制终止残留Python进程"
@@ -50,12 +51,10 @@ jobs:
           git config --global user.name "wsc7758"
           git config --global user.email "xxx@shturl."
 
-          # 同步线上最新代码
           git fetch origin main
           git reset --hard origin/main
           sync
 
-          # 强制写入全新时间戳，保证文件一定产生变更
           now=$(date "+%Y-%m-%d %H:%M:%S")
           echo -e "\n# 流水线自动刷新时间：${now}" >> tv.txt
 
