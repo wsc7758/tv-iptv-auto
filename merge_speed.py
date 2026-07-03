@@ -16,13 +16,13 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
-STREAM_TEST_TIMEOUT = 3  # 单链接3秒超时，放弃当前链接
+STREAM_TEST_TIMEOUT = 1  # 需求修改：单条链接测速1秒超时，超时直接丢弃本条
 MIN_VERTICAL_RES = 1080
 MAX_STREAM_PER_CHANNEL = 3
 SOURCE_FETCH_TIMEOUT = 3
 SOURCE_FETCH_WORKERS = 3
-STREAM_EVAL_WORKERS = 12  # 提升并发线程，缩短测速总耗时，避免15分钟超时
-batch_size = 60  # 每批60条链接，无批次总时长限制
+STREAM_EVAL_WORKERS = 12
+batch_size = 60  # 每批60条链接，无整批总时长限制
 DEBUG_LOG = False
 
 def is_stream_incompatible(url: str) -> bool:
@@ -47,6 +47,7 @@ def stream_quality_detect(url: str) -> tuple[float, int]:
     max_res = 720
     start = time.time()
     try:
+        # head与get均限制1秒
         resp = requests.head(url, headers=headers, timeout=STREAM_TEST_TIMEOUT, stream=True, verify=False, allow_redirects=True)
         delay = round(time.time() - start, 3)
         if resp.status_code == 200:
@@ -147,7 +148,7 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
                 real_idx = start + sub_idx
                 fut = exe.submit(stream_quality_detect, url)
                 batch_fut_map[fut] = real_idx
-            # 无整批总超时，单条3秒超时仅丢弃本条
+            # 无整批超时限制，单条1秒超时仅丢弃当前链接，继续测下一条
             for fu in concurrent.futures.as_completed(batch_fut_map):
                 real_idx = batch_fut_map[fu]
                 try:
@@ -185,7 +186,7 @@ def export_result(white_origin: list[str], final_stream_map: dict[str, list[str]
                 lines.append(f"{ch_name},{link}")
     with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-        # 写入时间戳，每次文件内容变更，git可识别推送
+        # 写入时间戳，保证每次文件变化，git可推送
         f.write(f"\n# 流水线自动生成更新时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         f.flush()
     os.sync()
@@ -230,12 +231,12 @@ def main():
         print(f"等待子线程销毁 {wait_cnt}/{wait_max}", flush=True)
         time.sleep(1)
 
-    # 释放urllib3底层C网络连接池
+    # 释放urllib3底层C网络连接池，杜绝后台残留线程卡死步骤
     http_pool = urllib3.PoolManager()
     http_pool.clear()
     os.sync()
     time.sleep(2)
-    # 标记资源完全释放，之后进入git步骤强制60秒上传
+    # 标记资源完全释放，后续git步骤强制60秒内上传tv.txt
     print("====== Python资源全部释放完成 ======", flush=True)
 
 if __name__ == "__main__":
