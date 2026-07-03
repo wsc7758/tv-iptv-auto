@@ -10,13 +10,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: 系统内核调优，强制快速回收TCP连接（前置执行，根治残留socket）
-        run: |
-          sudo sysctl -w net.ipv4.tcp_fin_timeout=10
-          sudo sysctl -w net.ipv4.tcp_tw_reuse=1
-          sudo sysctl -w net.ipv4.tcp_tw_recycle=1
-          sudo sysctl -w net.ipv4.tcp_orphan_retries=1
-
       - name: 检出仓库代码
         uses: actions/checkout@v4
         with:
@@ -28,21 +21,31 @@ jobs:
           pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install requests m3u8
 
-      # 合并单步，内核参数限制socket最多10秒回收，不会长期阻塞bash
-      - name: 测速+提交推送
+      # 第一步：仅测速，输出文件到系统临时目录，执行完直接销毁全部进程环境
+      - name: 测速生成临时文件（独立环境，无git阻塞）
         timeout-minutes: 4
         run: |
-          set -eo pipefail
           PYTHONUNBUFFERED=1 python3 merge_speed.py
+          # 把生成结果复制到系统全局临时目录，脱离仓库工作区
+          cp tv.txt /tmp/tmp_tv_m3u.txt
           sync
-          pkill -9 -f python3 || true
+          echo "测速完成，临时文件已写入/tmp，本步骤结束自动回收所有网络socket"
+
+      # 第二步：全新干净环境，读取临时文件执行git推送，无任何残留IO干扰
+      - name: 读取临时文件并提交推送
+        timeout-minutes: 1
+        run: |
+          set -eo pipefail
           sync
-          sleep 0.2
+          # 从系统临时目录复制回仓库目录
+          cp /tmp/tmp_tv_m3u.txt tv.txt
+          sync
           git config --global user.name "wsc7758"
           git config --global user.email "xxx@shturl."
           git add tv.txt
+          # 屏蔽diff输出，无变更正常退出不报错
           if git diff --cached --quiet >/dev/null 2>&1; then
-            echo "无更新"
+            echo "tv.txt无更新，任务正常完成"
             exit 0
           fi
           git fetch origin main
@@ -50,3 +53,4 @@ jobs:
           git add tv.txt
           git commit -m "流水线自动更新｜优选流媒体列表"
           git push origin main
+          echo "文件推送仓库成功"
