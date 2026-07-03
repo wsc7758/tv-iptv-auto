@@ -10,46 +10,20 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: 检出仓库代码
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: 安装Python依赖
+      # 第一步：纯运行Python，生成tv.txt，步骤结束环境全部销毁
+      - name: 执行分拣测速脚本，生成tv.txt
+        timeout-minutes: 10
         run: |
-          python3 -m pip install --upgrade pip
-          pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install requests m3u8
+          PYTHONUNBUFFERED=1 python3 merge_speed.py
+          sync
+          echo "分拣完成，tv.txt已生成"
 
-      - name: 测速+生成文件+提交推送 单步执行
-        timeout-minutes: 15
+      # 第二步：全新干净shell，无任何Python残留，直接git推送
+      - name: 提交推送tv.txt文件
+        timeout-minutes: 3
         run: |
           set -eo pipefail
-          cat > run_speed.sh << 'EOF'
-#!/bin/bash
-PYTHONUNBUFFERED=1 python3 merge_speed.py
-sync
-touch ./speed_finished.flag
-EOF
-          chmod +x run_speed.sh
-          nohup ./run_speed.sh > speed.log 2>&1 &
-          TASK_PID=$!
-          echo "测速后台进程PID: $TASK_PID"
-          WAIT_COUNT=0
-          while [ ! -f "./speed_finished.flag" ]; do
-            sleep 2
-            WAIT_COUNT=$((WAIT_COUNT+2))
-            echo "等待测速完成，已等待${WAIT_COUNT}秒..."
-            if [ $WAIT_COUNT -ge 600 ]; then
-              echo "测速超时，终止后台进程"
-              kill $TASK_PID || true
-              exit 1
-            fi
-          done
-          echo "检测到测速完成标志文件，Python业务全部执行完毕"
-          rm -f run_speed.sh speed.log speed_finished.flag
           sync
-          sleep 2
           git config --global user.name "wsc7758"
           git config --global user.email "xxx@shturl."
           git add tv.txt
@@ -62,4 +36,4 @@ EOF
           git add tv.txt
           git commit -m "流水线自动更新｜优选流媒体列表"
           git push origin main
-          echo "文件推送仓库完成，全部流程结束"
+          echo "文件推送仓库完成"
