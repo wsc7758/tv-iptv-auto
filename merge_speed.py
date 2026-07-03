@@ -10,15 +10,18 @@ import urllib3
 import threading
 import os
 import datetime
+import signal
 
+# 屏蔽urllib3警告，禁用连接复用
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+urllib3.connectionpool.ConnectionPool._get_conn = lambda self, timeout: self._new_conn()
 
 # 全局参数
 SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
-STREAM_REQ_TIMEOUT = 1    # 单次head/get网络请求1秒超时
-TASK_WAIT_TIMEOUT = 12    # 单个测速线程总运行上限12秒，超12s停止测当前批次剩余链接
+STREAM_REQ_TIMEOUT = 1    # 单次网络请求1秒硬超时
+TASK_GLOBAL_TIMEOUT = 12  # 单个线程总运行上限12秒，超12s终止所有后续测速
 MIN_VERTICAL_RES = 1080
 MAX_STREAM_PER_CHANNEL = 3
 SOURCE_FETCH_TIMEOUT = 3
@@ -26,6 +29,13 @@ SOURCE_FETCH_WORKERS = 3
 STREAM_EVAL_WORKERS = 12
 batch_size = 60
 DEBUG_LOG = False
+
+# 信号处理：超时强制抛出异常，杀死阻塞网络请求
+class TaskTimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TaskTimeoutException("单链接测速全局12秒超时")
 
 def is_stream_incompatible(url: str) -> bool:
     ban_list = {"127.", "192.168.", "10.", "172.", "localhost", "rtmp://", "igmp://"}
@@ -44,7 +54,7 @@ def get_stream_priority(url: str) -> int:
     return 1
 
 def stream_quality_detect(url: str) -> tuple[float, int]:
-    headers = {"User-Agent": "Mozilla/5.0 AndroidTV"}
+    headers = {"User-Agent": "Mozilla/5.0 AndroidTV", "Connection": "close"}
     delay = 9999.0
     max_res = 720
     start = time.time()
@@ -77,16 +87,26 @@ def stream_quality_detect(url: str) -> tuple[float, int]:
         pass
     return delay, max_res
 
-def batch_subtask(url_list: list[tuple[int, str, str]]) -> dict[int, tuple[float, int]]:
-    """单一线程批量处理一组链接，12秒超时后停止后续链接，已测成功数据全部返回"""
+def batch_subtask(url_group: list[tuple[int, str, str]]) -> dict[int, tuple[float, int]]:
+    """单线程批量测速：12秒全局超时，已测出有效链接全部返回，卡死请求强制终止"""
     task_start = time.time()
     local_result = {}
-    for real_idx, ch_name, url in url_list:
-        # 判断当前线程总耗时是否超过12秒，超时直接终止，已测数据返回
-        if time.time() - task_start >= TASK_WAIT_TIMEOUT:
-            break
-        delay, res = stream_quality_detect(url)
-        local_result[real_idx] = (delay, res)
+    # 注册12秒超时信号
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(TASK_GLOBAL_TIMEOUT)
+    try:
+        for real_idx, ch_name, url in url_group:
+            # 双重防护：循环前置判断超时
+            if time.time() - task_start >= TASK_GLOBAL_TIMEOUT:
+                print(f"【线程超时】已运行满12秒，停止剩余链接，已测数据保留", flush=True)
+                break
+            print(f"【测速中】{ch_name} | {url}", flush=True)
+            delay, res = stream_quality_detect(url)
+            local_result[real_idx] = (delay, res)
+    except TaskTimeoutException:
+        print(f"【线程强制超时】线程总时长超过12秒，终止测速，已测{len(local_result)}条有效链接保留", flush=True)
+    finally:
+        signal.alarm(0)
     return local_result
 
 def load_source_list() -> list[str]:
@@ -120,7 +140,7 @@ def load_white_list() -> tuple[list[str], set[str]]:
     return origin_order, lower_match_set
 
 def fetch_channel_from_source(src_link: str, white_lower_set: set[str]) -> list[tuple[str, str]]:
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36", "Connection": "close"}
     result_pairs = []
     if src_link.startswith("//"):
         src_link = "https:" + src_link
@@ -167,30 +187,29 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
         batch_items = ch_url_index[start:start + batch_size]
         batch_end_idx = min(start + batch_size, total_url)
         print(f"【测速批次】{start+1} ~ {batch_end_idx} / {total_url}", flush=True)
-        # 均分当前批次60条链接给12个并发线程
+        # 均分批次链接给12个线程
         sub_task_groups = [[] for _ in range(STREAM_EVAL_WORKERS)]
         for idx, item in enumerate(batch_items):
             sub_task_groups[idx % STREAM_EVAL_WORKERS].append(item)
-        batch_fut_map = {}
         exe = concurrent.futures.ThreadPoolExecutor(max_workers=STREAM_EVAL_WORKERS)
         try:
-            for group in sub_task_groups:
-                if not group:
-                    continue
-                fut = exe.submit(batch_subtask, group)
-                batch_fut_map[fut] = None
-            # 收集每个线程返回的已测速有效数据，线程超时已测数据全部保留
-            for fu in concurrent.futures.as_completed(batch_fut_map):
+            futures = [exe.submit(batch_subtask, g) for g in sub_task_groups if g]
+            for fu in concurrent.futures.as_completed(futures):
                 try:
-                    sub_result = fu.result()
-                    task_result.update(sub_result)
-                except Exception:
-                    continue
+                    sub_res = fu.result()
+                    # 合并本线程所有已测速数据，超时不丢失
+                    task_result.update(sub_res)
+                except Exception as e:
+                    print(f"【线程异常】线程执行出错，丢弃本组未完成链接，已测数据保留：{str(e)}", flush=True)
         finally:
+            # 取消未完成任务，不阻塞等待卡死IO
             exe.shutdown(wait=False, cancel_futures=True)
+            # 强制清空全局连接池，释放端口
             pool = urllib3.PoolManager()
             pool.clear()
+            print(f"【批次完成】{start+1}~{batch_end_idx} 批次所有线程资源回收完毕", flush=True)
 
+    # 汇总所有测速结果，排序取最优3条
     ch_temp = defaultdict(list)
     for idx, ch_name, url in ch_url_index:
         delay, res = task_result.get(idx, (9999, 0))
@@ -239,7 +258,7 @@ def main():
                 print("【警告】单个直播源拉取超时，自动跳过", flush=True)
             except Exception as e:
                 print(f"【警告】直播源处理异常：{str(e)}", flush=True)
-    # 链接全局去重
+    # 频道链接去重
     for ch in raw_channel_cache:
         unique_urls = list(dict.fromkeys(raw_channel_cache[ch]))
         raw_channel_cache[ch] = unique_urls
@@ -249,7 +268,7 @@ def main():
     export_result(white_origin_list, qualified_channel_map)
     print("====== 脚本全部执行完毕 ======", flush=True)
 
-    # 等待Python层线程销毁（最多15秒）
+    # 等待Python层用户线程销毁
     wait_max = 15
     wait_cnt = 0
     while wait_cnt < wait_max:
@@ -260,7 +279,7 @@ def main():
         print(f"等待子线程销毁 {wait_cnt}/{wait_max}", flush=True)
         time.sleep(1)
 
-    # 最终释放底层网络连接池
+    # 最终释放网络资源
     http_pool = urllib3.PoolManager()
     http_pool.clear()
     os.sync()
