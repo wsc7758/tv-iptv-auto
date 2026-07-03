@@ -180,14 +180,12 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
         try:
             futures = [exe.submit(batch_subtask, g) for g in sub_task_groups if g]
             complete_futures = set()
-            # 核心修复：as_completed增加0.3秒最小阻塞超时，保证循环每0.3秒一定放行，执行批次25秒判断
+            # 核心修复：as_completed增加0.3秒最小阻塞超时，保证循环每0.3秒放行
             while len(complete_futures) < len(futures):
-                # 先判断批次是否超时，满足直接跳出
                 if time.time() - batch_start_time >= BATCH_GLOBAL_TIMEOUT:
                     print(f"【批次超时】本批运行已满25秒，终止剩余未完成测速，已测数据全部保留", flush=True)
                     break
                 try:
-                    # 0.3秒超时，不会永久阻塞卡死线程
                     for fu in concurrent.futures.as_completed(futures, timeout=0.3):
                         if fu not in complete_futures:
                             complete_futures.add(fu)
@@ -197,17 +195,14 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
                             except Exception as e:
                                 print(f"【线程异常】本组线程出错，已测数据保留：{str(e)}", flush=True)
                 except concurrent.futures.TimeoutError:
-                    # as_completed 0.3秒无完成任务，捕获异常，回到循环顶部重新判断25秒批次超时
                     continue
         finally:
-            # 取消所有未完成任务，不阻塞等待卡死IO
             exe.shutdown(wait=False, cancel_futures=True)
-            # 强制清空全局连接池，释放端口
             pool = urllib3.PoolManager()
             pool.clear()
             print(f"【批次完成】{start+1}~{batch_end_idx} 批次资源回收完毕", flush=True)
 
-    # 汇总所有测速结果，排序取最优3条
+    # 汇总测速结果，排序取最优3条
     ch_temp = defaultdict(list)
     for idx, ch_name, url in ch_url_index:
         delay, res = task_result.get(idx, (9999, 0))
@@ -264,25 +259,13 @@ def main():
     qualified_channel_map = filter_best_streams(raw_channel_cache)
     print(f"【阶段2完成】完成测速筛选频道数量：{len(qualified_channel_map)}", flush=True)
     export_result(white_origin_list, qualified_channel_map)
-    print("====== 脚本全部执行完毕 ======", flush=True)
-
-    # 等待Python层用户线程销毁
-    wait_max = 15
-    wait_cnt = 0
-    while wait_cnt < wait_max:
-        alive_threads = [t for t in threading.enumerate() if t != threading.current_thread()]
-        if len(alive_threads) == 0:
-            break
-        wait_cnt += 1
-        print(f"等待子线程销毁 {wait_cnt}/{wait_max}", flush=True)
-        time.sleep(1)
-
-    # 最终释放网络资源
+    print("====== Python资源全部释放完成 ======", flush=True)
+    # ========== 关键修改：彻底删除15秒等待子线程销毁循环 ==========
+    # 直接清空连接池，不再阻塞等待残留IO线程
     http_pool = urllib3.PoolManager()
     http_pool.clear()
     os.sync()
-    time.sleep(2)
-    print("====== Python资源全部释放完成 ======", flush=True)
+    time.sleep(0.5)
 
 if __name__ == "__main__":
     main()
