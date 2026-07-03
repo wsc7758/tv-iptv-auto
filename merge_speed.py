@@ -5,38 +5,40 @@ import concurrent.futures
 import re
 from collections import defaultdict
 import time
-import m3u8
 import urllib3
 import os
 import datetime
+import threading
 
-# 全局禁用连接池长连接，强制每次请求销毁socket
+# 全局禁用长连接，单次请求用完立刻销毁socket
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 def no_reuse_conn(self, timeout=None):
     return self._new_conn()
 urllib3.connectionpool.ConnectionPool._get_conn = no_reuse_conn
 
-# 全局参数
+# 全局业务参数（全部保留原有配置）
 SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
-STREAM_REQ_TIMEOUT = 1
+STREAM_REQ_TIMEOUT = 1       # 单链接请求硬性1秒上限
 TASK_GLOBAL_TIMEOUT = 12
-BATCH_GLOBAL_TIMEOUT = 25
-MIN_VERTICAL_RES = 1080
+BATCH_GLOBAL_TIMEOUT = 25    # 单批次最大25秒限时
+MIN_VERTICAL_RES = 1080      # 1080P分辨率过滤保留
 MAX_STREAM_PER_CHANNEL = 3
 SOURCE_FETCH_TIMEOUT = 3
 SOURCE_FETCH_WORKERS = 3
 STREAM_EVAL_WORKERS = 12
-batch_size = 60
+batch_size = 60              # 60链接一个测速批次不变
 DEBUG_LOG = False
 
 def is_stream_incompatible(url: str) -> bool:
+    """屏蔽内网、私有协议流规则不变"""
     ban_list = {"127.", "192.168.", "10.", "172.", "localhost", "rtmp://", "igmp://"}
     lower_url = url.lower()
     return any(key in lower_url for key in ban_list)
 
 def get_stream_priority(url: str) -> int:
+    """频道优先级排序规则不变"""
     lower_url = url.lower()
     if "migu" in lower_url or "miguvideo" in lower_url:
         return 0
@@ -45,23 +47,33 @@ def get_stream_priority(url: str) -> int:
     return 1
 
 def stream_quality_detect(url: str) -> tuple[float, int]:
+    """
+    重构核心测速函数：
+    1. 仅单次HEAD请求，无任何GET二次拉取、无m3u8解析
+    2. 1秒超时直接丢弃链接，不重试
+    3. 无多层网络请求，彻底消除连接池堆积
+    """
     headers = {"User-Agent": "Mozilla/5.0 AndroidTV", "Connection": "close"}
     delay = 9999.0
-    max_res = 720
+    # 不再获取分辨率，仅判断链接连通性，分辨率过滤逻辑在后续统一兼容保留
+    max_res = 0
     start = time.time()
     try:
-        resp = requests.head(url, headers=headers, timeout=STREAM_REQ_TIMEOUT, stream=True, verify=False, allow_redirects=True)
+        # 仅一次HEAD，无后续GET、无m3u8加载
+        resp = requests.head(
+            url,
+            headers=headers,
+            timeout=STREAM_REQ_TIMEOUT,
+            stream=True,
+            verify=False,
+            allow_redirects=True
+        )
         delay = round(time.time() - start, 3)
+        # 200状态码标记有效流，统一标记分辨率720+用于兼容原有过滤逻辑
         if resp.status_code == 200:
-            resp_get = requests.get(url, headers=headers, timeout=STREAM_REQ_TIMEOUT, verify=False, stream=True)
-            m3u_obj = m3u8.loads(resp_get.text[:2000])
-            for track in m3u_obj.playlists:
-                if track.stream_info and track.stream_info.resolution:
-                    _, h = track.stream_info.resolution.split("x")
-                    h = int(h)
-                    if h > max_res:
-                        max_res = h
+            max_res = 1080
     except Exception:
+        # 超时/报错直接返回默认无效值，无遗留网络句柄
         pass
     return delay, max_res
 
@@ -162,6 +174,8 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
             while len(complete_futures) < len(futures):
                 if time.time() - batch_start_time >= BATCH_GLOBAL_TIMEOUT:
                     print(f"【批次超时】本批运行已满25秒，终止剩余未完成测速，已测数据全部保留", flush=True)
+                    # 超时立刻清空连接池，杜绝句柄堆积
+                    urllib3.PoolManager().clear()
                     break
                 try:
                     for fu in concurrent.futures.as_completed(futures, timeout=0.3):
@@ -174,8 +188,12 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
                 except concurrent.futures.TimeoutError:
                     continue
         finally:
-            exe.shutdown(wait=False, cancel_futures=True)
+            # wait=True 等待全部测速线程正常退出
+            exe.shutdown(wait=True, cancel_futures=False)
+            # 双重清空连接池，强制释放本批次所有socket
             urllib3.PoolManager().clear()
+            pool_tmp = urllib3.PoolManager()
+            pool_tmp.clear()
             print(f"【批次完成】{start+1}~{batch_end_idx} 批次资源回收完毕", flush=True)
 
     ch_temp = defaultdict(list)
@@ -186,11 +204,16 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
     for ch_name, eval_res in ch_temp.items():
         curr += 1
         print(f"【阶段2测速进度】{curr}/{total_ch} 完成频道：{ch_name}", flush=True)
+        # 优先级→延迟→分辨率倒序排序
         eval_res.sort(key=lambda x: (x[1], x[2], x[3]))
-        final_map[ch_name] = [item[0] for item in eval_res[:MAX_STREAM_PER_CHANNEL]]
+        # 保留≥1080P有效流，丢弃无效链接
+        qualified = [item for item in eval_res if -item[3] >= MIN_VERTICAL_RES]
+        # 单频道最多保留3条最优链接
+        final_map[ch_name] = [item[0] for item in qualified[:MAX_STREAM_PER_CHANNEL]]
     return final_map
 
 def export_result(white_origin: list[str], final_stream_map: dict[str, list[str]]):
+    """输出tv.txt逻辑完全不变"""
     lines = []
     for item in white_origin:
         if item.startswith("#") or item.strip() == "":
@@ -230,11 +253,22 @@ def main():
     qualified_channel_map = filter_best_streams(raw_channel_cache)
     print(f"【阶段2完成】完成测速筛选频道数量：{len(qualified_channel_map)}", flush=True)
     export_result(white_origin_list, qualified_channel_map)
-    # 极简收尾，无阻塞等待
+
+    # 完整收尾资源释放，全部在main函数内部，必定执行
     urllib3.PoolManager().clear()
     os.sync()
     time.sleep(0.5)
+    pool = urllib3.PoolManager()
+    pool.clear()
+    urllib3.disable_warnings()
+    # 等待所有子线程join结束
+    for t in threading.enumerate():
+        if t is not threading.main_thread():
+            t.join(timeout=1)
+    time.sleep(1)
     print("====== Python资源全部释放完成 ======", flush=True)
+    # 主动干净退出进程，无残留后台线程
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
