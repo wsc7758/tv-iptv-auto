@@ -20,7 +20,7 @@ urllib3.connectionpool.ConnectionPool._get_conn = no_reuse_conn
 SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
-STREAM_REQ_TIMEOUT = 1
+STREAM_REQ_TIMEOUT = 1.5
 TASK_GLOBAL_TIMEOUT = 12
 BATCH_GLOBAL_TIMEOUT = 25
 MIN_VERTICAL_RES = 1080
@@ -94,24 +94,28 @@ def load_source_list() -> list[str]:
     print(f"【阶段1-源池加载】待拉取直播源节点总数：{len(source_list)}", flush=True)
     return source_list
 
-# 白名单读取：识别 xxx,#genre# 分类标记
+# 修复：完整清洗每行换行/空格，解决#genre#分组识别失败丢失CCTV
 def load_white_list() -> tuple[list, dict]:
     group_info = []
     channel_to_group = dict()
     current_group = ""
     with open(WHITE_LIST_FILE, "r", encoding="utf-8") as f:
         for line in f.readlines():
-            raw_line = line.rstrip("\n").strip()
+            # 彻底清除\r \n 首尾空格
+            raw_line = line.replace("\r","").replace("\n","").strip()
             if not raw_line:
                 continue
             if raw_line.endswith(",#genre#"):
-                current_group = raw_line.replace(",#genre#", "")
+                current_group = raw_line.replace(",#genre#", "").strip()
                 group_info.append((current_group, []))
                 continue
             if current_group:
-                group_info[-1][1].append(raw_line)
-                channel_to_group[raw_line] = current_group
-    print(f"【阶段1-白名单加载】共读取分类数量：{len(group_info)}", flush=True)
+                clean_ch = raw_line.strip()
+                group_info[-1][1].append(clean_ch)
+                channel_to_group[clean_ch] = current_group
+    print(f"【阶段1-白名单加载】共读取分类数量：{len(group_info)}，白名单频道总数：{len(channel_to_group)}", flush=True)
+    # 打印所有白名单频道，校验CCTV是否存在
+    print(f"【白名单全频道列表】{list(channel_to_group.keys())}", flush=True)
     return group_info, channel_to_group
 
 def fetch_channel_from_source(src_link: str, white_channel_set: set[str]) -> list[tuple[str, str]]:
@@ -129,14 +133,13 @@ def fetch_channel_from_source(src_link: str, white_channel_set: set[str]) -> lis
             if ch_name.startswith("#"):
                 continue
             ch_lower = ch_name.lower()
-            if ch_lower in white_channel_set and not is_stream_incompatible(stream_url):
+            if ch_name in white_channel_set and not is_stream_incompatible(stream_url):
                 result_pairs.append((ch_name, stream_url))
         m3u_pattern = re.compile(r"#EXTINF:-1,([^\n]+)\n(https?://[^\n]+)")
         for ch_name, stream_url in m3u_pattern.findall(text):
             ch_name = ch_name.strip()
             stream_url = stream_url.strip()
-            ch_lower = ch_name.lower()
-            if ch_lower in white_channel_set and not is_stream_incompatible(stream_url):
+            if ch_name in white_channel_set and not is_stream_incompatible(stream_url):
                 result_pairs.append((ch_name, stream_url))
     except Exception as e:
         if DEBUG_LOG:
@@ -148,6 +151,8 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
     total_ch = len(channel_raw_map)
     ch_url_index = []
     curr_idx = 0
+    # 打印所有待测速频道，确认CCTV是否进入测速队列
+    print(f"【全部待测速频道列表】{list(channel_raw_map.keys())}", flush=True)
     for ch_name, url_list in channel_raw_map.items():
         for url in url_list:
             ch_url_index.append((curr_idx, ch_name, url))
