@@ -8,16 +8,15 @@ on:
 jobs:
   stream-sort-task:
     runs-on: ubuntu-latest
-    # 授予Actions bot读写仓库权限，解决git push 403报错
     permissions:
       contents: write
     steps:
       - name: 检出仓库代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 拉取完整git历史，减少分支冲突
+          fetch-depth: 0
 
-      - name: 安装Python运行依赖（清华镜像+官方源兜底）
+      - name: 安装Python运行依赖（清华镜像加速）
         run: |
           python3 -m pip install --upgrade pip
           pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -29,24 +28,25 @@ jobs:
       - name: 仅执行分拣脚本
         run: |
           PYTHONUNBUFFERED=1 timeout 1800 python3 merge_speed.py
+          sync
           echo "分拣脚本执行结束，校验tv.txt文件是否生成"
           ls -lh tv.txt
           tail -5 tv.txt
 
+      # 此步骤独立60秒硬超时，文件生成后立刻进入推送逻辑
       - name: 磁盘同步+git提交（单独60秒超时，每步打印日志）
         timeout-minutes: 1
         run: |
           set -eo pipefail
-          echo "1. 执行磁盘同步，确保tv.txt完整写入硬盘"
+          echo "1. 磁盘同步锁定文件"
           sync
-          sleep 2
+          sleep 0.5
           echo "2. 配置Git提交用户"
           git config --global user.name "wsc7758"
           git config --global user.email "xxx@shturl."
           echo "3. 将tv.txt加入暂存区"
           git add tv.txt
           echo "4. 判断文件是否存在变更"
-          # 捕获diff退出码，无变更直接正常退出0，不触发set -eo pipefail失败
           if git diff --cached --quiet; then
             echo "无更新，直接结束流程，跳过推送"
             exit 0
