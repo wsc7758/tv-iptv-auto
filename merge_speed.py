@@ -9,15 +9,14 @@ import m3u8
 import urllib3
 import os
 import datetime
-import threading
 
-# 全局禁用长连接，每次请求用完销毁socket
+# 全局禁用连接池长连接，强制每次请求销毁socket
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 def no_reuse_conn(self, timeout=None):
     return self._new_conn()
 urllib3.connectionpool.ConnectionPool._get_conn = no_reuse_conn
 
-# 全局参数（你的业务需求全部保留）
+# 全局参数
 SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
@@ -163,8 +162,6 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
             while len(complete_futures) < len(futures):
                 if time.time() - batch_start_time >= BATCH_GLOBAL_TIMEOUT:
                     print(f"【批次超时】本批运行已满25秒，终止剩余未完成测速，已测数据全部保留", flush=True)
-                    # 新增：批次超时立刻清空连接池，防止连接堆积阻塞
-                    urllib3.PoolManager().clear()
                     break
                 try:
                     for fu in concurrent.futures.as_completed(futures, timeout=0.3):
@@ -177,11 +174,8 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
                 except concurrent.futures.TimeoutError:
                     continue
         finally:
-            exe.shutdown(wait=True, cancel_futures=False)
-            # 双重清空连接池兜底
+            exe.shutdown(wait=False, cancel_futures=True)
             urllib3.PoolManager().clear()
-            pool_tmp = urllib3.PoolManager()
-            pool_tmp.clear()
             print(f"【批次完成】{start+1}~{batch_end_idx} 批次资源回收完毕", flush=True)
 
     ch_temp = defaultdict(list)
@@ -193,9 +187,7 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]]) -> dict[str, list
         curr += 1
         print(f"【阶段2测速进度】{curr}/{total_ch} 完成频道：{ch_name}", flush=True)
         eval_res.sort(key=lambda x: (x[1], x[2], x[3]))
-        # 1080P分辨率过滤保留
-        qualified = [item for item in eval_res if -item[3] >= MIN_VERTICAL_RES]
-        final_map[ch_name] = [item[0] for item in qualified[:MAX_STREAM_PER_CHANNEL]]
+        final_map[ch_name] = [item[0] for item in eval_res[:MAX_STREAM_PER_CHANNEL]]
     return final_map
 
 def export_result(white_origin: list[str], final_stream_map: dict[str, list[str]]):
@@ -238,22 +230,11 @@ def main():
     qualified_channel_map = filter_best_streams(raw_channel_cache)
     print(f"【阶段2完成】完成测速筛选频道数量：{len(qualified_channel_map)}", flush=True)
     export_result(white_origin_list, qualified_channel_map)
-
-    # 全部收尾释放逻辑统一放在main内部，一定会执行
+    # 极简收尾，无阻塞等待
     urllib3.PoolManager().clear()
     os.sync()
     time.sleep(0.5)
-    pool = urllib3.PoolManager()
-    pool.clear()
-    urllib3.disable_warnings()
-    # 等待所有残留子线程完全结束
-    for t in threading.enumerate():
-        if t is not threading.main_thread():
-            t.join(timeout=1)
-    time.sleep(1)
     print("====== Python资源全部释放完成 ======", flush=True)
-    # 主动干净退出程序
-    sys.exit(0)
 
 if __name__ == "__main__":
     main()
