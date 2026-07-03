@@ -19,7 +19,7 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install requests m3u8
+          pip install requests
 
       - name: 执行分拣测速脚本，生成tv.txt
         timeout-minutes: 13
