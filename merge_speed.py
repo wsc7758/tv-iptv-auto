@@ -241,8 +241,11 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]], core_mapping: dic
             complete_futures = set()
             while len(complete_futures) < len(futures):
                 if time.time() - batch_start_time >= BATCH_GLOBAL_TIMEOUT:
-                    print(f"【批次超时】本批运行已满25秒，终止剩余未完成测速，已测数据全部保留", flush=True)
+                    print(f"【批次超时】本批运行已满25秒，终止剩余未完成测速，已测数据全部保留，强制清理线程池", flush=True)
                     urllib3.PoolManager().clear()
+                    # 强制取消所有未完成任务，立刻跳出循环
+                    for fu in futures:
+                        fu.cancel()
                     break
                 try:
                     for fu in concurrent.futures.as_completed(futures, timeout=0.3):
@@ -255,11 +258,12 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]], core_mapping: dic
                 except concurrent.futures.TimeoutError:
                     continue
         finally:
-            exe.shutdown(wait=True, cancel_futures=False)
+            # wait=False：不等待卡死线程；cancel_futures=True：强制取消残留任务，快速释放资源
+            exe.shutdown(wait=False, cancel_futures=True)
             urllib3.PoolManager().clear()
             pool_tmp = urllib3.PoolManager()
             pool_tmp.clear()
-            print(f"【批次完成】{start+1}~{batch_end_idx} 批次资源回收完毕", flush=True)
+            print(f"【批次完成】{start+1}~{batch_end_idx} 线程池已强制清空，进入下一批次", flush=True)
     # 组装每条数据：(url, 源优先级, 是否不匹配频道, 延迟, -高度, 是否4:3)
     ch_temp = defaultdict(list)
     for idx, ch_name, url, _ in ch_url_index:
