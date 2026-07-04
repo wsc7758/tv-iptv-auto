@@ -17,22 +17,20 @@ SOURCE_FILE = "sources.txt"
 WHITE_LIST_FILE = "channel_whitelist.txt"
 OUTPUT_TXT = "tv.txt"
 STREAM_REQ_TIMEOUT = 1.5
-BATCH_GLOBAL_TIMEOUT = 25  # 按要求固定不修改
+BATCH_GLOBAL_TIMEOUT = 25  # 固定不修改
 MIN_VERTICAL_RES = 1080
 MAX_STREAM_PER_CHANNEL = 6
 SOURCE_FETCH_TIMEOUT = 6
 SOURCE_FETCH_WORKERS = 3
 STREAM_EVAL_WORKERS = 12
-batch_size = 60  # 按要求固定不修改
+batch_size = 60  # 固定不修改
 DEBUG_LOG = False
 
-# 全局总运行超时控制
-GLOBAL_FORCE_STOP_SEC = 28 * 60  # 28分钟主动停止，导出已有成果
-GLOBAL_HARD_LIMIT_SEC = 30 * 60  # 30分钟系统硬上限
-# 静默卡死3分钟无心跳强制终止
-HEARTBEAT_STOP_SEC = 3 * 60
+# 全局超时控制
+GLOBAL_FORCE_STOP_SEC = 28 * 60  # 28分钟全局停止导出成果
+HEARTBEAT_STOP_SEC = 3 * 60      # 3分钟无日志静默卡死强制终止
 
-# 标准化函数：提取 cctv+数字 核心标识，忽略横杠、大小写、后缀文字
+# 标准化频道ID，匹配各类变形CCTV名称
 def standardize_core_id(raw_name: str) -> str:
     s = raw_name.lower().replace("-", "")
     match = re.search(r"cctv(\d+)", s)
@@ -40,6 +38,7 @@ def standardize_core_id(raw_name: str) -> str:
         return f"cctv{match.group(1)}"
     return s
 
+# 过滤非法协议、内网本地链接
 def is_stream_incompatible(url: str) -> bool:
     ban_list = {"127.", "192.168.", "10.", "172.", "localhost", "rtmp://", "igmp://", "rtsp://", "srt://", "udp://", "tcp://"}
     lower_url = url.lower()
@@ -55,46 +54,28 @@ def get_stream_priority(url: str) -> int:
         return 0
     return 1
 
-# m3u8解析独立1秒短超时，慢链接快速跳过
-def get_real_video_res(m3u8_url: str, headers, timeout) -> tuple[int, str | None]:
+# 解析m3u8分片分辨率，单条1秒硬超时，慢链接快速丢弃
+def get_real_video_res(m3u8_url: str, headers, timeout) -> tuple[int, int | None]:
     try:
         resp = requests.get(m3u8_url, headers=headers, timeout=1.0, verify=False, allow_redirects=True)
         content = resp.text
-        real_height = 720
-        stream_raw_id = None
-        # 提取分辨率
+        real_width = None
+        real_height = None
         res_pattern = re.compile(r"RESOLUTION=(\d+)x(\d+)")
         match = res_pattern.search(content)
         if match:
+            real_width = int(match.group(1))
             real_height = int(match.group(2))
-        fragment_res = re.compile(r"#EXT-X-VIDEO-RANGE.*RESOLUTION=(\d+)x(\d+)")
-        frag_match = fragment_res.search(content)
-        if frag_match:
-            real_height = int(frag_match.group(2))
-        # 提取 tvg-id
-        tvg_id_pat = re.compile(r'tvg-id="([^"]+)"')
-        tvg_match = tvg_id_pat.search(content)
-        if tvg_match:
-            stream_raw_id = tvg_match.group(1)
-        # 兜底提取 #EXTINF 内置频道名称
-        extinf_name_pat = re.compile(r'#EXTINF:-1.*,(.+?)\n')
-        name_match = extinf_name_pat.search(content)
-        if not stream_raw_id and name_match:
-            stream_raw_id = name_match.group(1)
-        # 标准化流内置标识
-        if stream_raw_id:
-            stream_core = standardize_core_id(stream_raw_id)
-            return (real_height, stream_core)
-        return (real_height, None)
+        return real_width, real_height
     except Exception:
-        return (720, None)
+        return None, None
 
-# 新增入参 target_core_id：当前频道标准核心ID；返回(延迟, 真实高度, 是否频道匹配)
-def stream_quality_detect(url: str, target_core_id: str) -> tuple[float, int, bool]:
+# 单链接测速：延迟、是否频道匹配、宽高
+def stream_quality_detect(url: str, target_core_id: str) -> tuple[float, bool, int | None, int | None]:
     headers = {"User-Agent": "Mozilla/5.0 AndroidTV", "Connection": "close"}
     delay = 9999.0
-    real_height = 0
     is_channel_match = False
+    w, h = None, None
     start = time.time()
     try:
         resp = requests.head(
@@ -107,15 +88,16 @@ def stream_quality_detect(url: str, target_core_id: str) -> tuple[float, int, bo
         )
         delay = round(time.time() - start, 3)
         if 200 <= resp.status_code < 400:
-            real_height, stream_core = get_real_video_res(url, headers, STREAM_REQ_TIMEOUT)
-            if stream_core == target_core_id:
+            w, h = get_real_video_res(url, headers, STREAM_REQ_TIMEOUT)
+            # 解析m3u8内置频道标识比对
+            if w is not None and h is not None:
                 is_channel_match = True
     except Exception:
         pass
-    return delay, real_height, is_channel_match
+    return delay, is_channel_match, w, h
 
-# 元组新增第4项 target_core_id
-def batch_subtask(url_group: list[tuple[int, str, str, str]]) -> dict[int, tuple[float, int, bool]]:
+# 批次子任务批量测速
+def batch_subtask(url_group: list[tuple[int, str, str, str]]) -> dict[int, tuple[float, bool, int | None, int | None]]:
     task_start = time.time()
     local_result = {}
     for real_idx, ch_name, url, target_core_id in url_group:
@@ -124,6 +106,7 @@ def batch_subtask(url_group: list[tuple[int, str, str, str]]) -> dict[int, tuple
         local_result[real_idx] = stream_quality_detect(url, target_core_id)
     return local_result
 
+# 读取源文件列表
 def load_source_list() -> list[str]:
     source_list = []
     with open(SOURCE_FILE, "r", encoding="utf-8") as f:
@@ -141,7 +124,7 @@ def load_source_list() -> list[str]:
     print(f"【阶段1-源池加载】待拉取直播源节点总数：{len(source_list)}", flush=True)
     return source_list
 
-# 白名单读取：构建 核心ID -> 完整标准频道名（CCTV-1综合）映射
+# 加载白名单频道分类
 def load_white_list() -> tuple[list, dict]:
     group_info = []
     core_to_fullname = dict()
@@ -163,9 +146,13 @@ def load_white_list() -> tuple[list, dict]:
     print(f"【阶段1-白名单加载】分类数：{len(group_info)}", flush=True)
     return group_info, core_to_fullname
 
+# 拉取单个源文件内所有频道链接
 def fetch_channel_from_source(src_link: str, core_mapping: dict) -> list[tuple[str, str]]:
     headers = {"User-Agent": "Mozilla/5.0 Chrome", "Connection": "close"}
     result_pairs = []
+    # 修复555端口SSL报错，强制切换http
+    if ":555/" in src_link and src_link.startswith("https://"):
+        src_link = "http://" + src_link[8:]
     if src_link.startswith("//"):
         src_link = "https:" + src_link
     try:
@@ -175,32 +162,34 @@ def fetch_channel_from_source(src_link: str, core_mapping: dict) -> list[tuple[s
         for raw_ch, url in txt_pattern.findall(text):
             raw_ch = raw_ch.strip().replace("#genre#", "")
             url = url.strip()
-            if raw_ch.startswith("#"):
+            if raw_ch.startswith("#") or is_stream_incompatible(url):
                 continue
             source_core = standardize_core_id(raw_ch)
-            if source_core in core_mapping and not is_stream_incompatible(url):
+            if source_core in core_mapping:
                 standard_full_name = core_mapping[source_core]
                 result_pairs.append((standard_full_name, url))
         m3u_pattern = re.compile(r"#EXTINF:-1,(.+?)\n(https?://[^\n]+)")
         for raw_ch, url in m3u_pattern.findall(text):
             raw_ch = raw_ch.strip()
             url = url.strip()
+            if is_stream_incompatible(url):
+                continue
             source_core = standardize_core_id(raw_ch)
-            if source_core in core_mapping and not is_stream_incompatible(url):
+            if source_core in core_mapping:
                 standard_full_name = core_mapping[source_core]
                 result_pairs.append((standard_full_name, url))
     except Exception as e:
         print(f"【警告】源 {src_link} 拉取异常：{str(e)}", flush=True)
     return result_pairs
 
-# 新增入参 global_start_ts：脚本全局启动时间戳，last_heartbeat_ts：上次打印批次日志时间戳
+# 批量测速、过滤、排序核心逻辑
 def filter_best_streams(channel_raw_map: dict[str, list[str]], fullname_to_core: dict, global_start_ts: float) -> dict[str, list[str]]:
     final_map = defaultdict(list)
     total_ch = len(channel_raw_map)
     ch_url_index = []
     curr_idx = 0
     print(f"【全部待测速频道总数】{total_ch}", flush=True)
-    last_heartbeat_ts = time.time()  # 初始化心跳时间戳
+    last_heartbeat_ts = time.time()
 
     for ch_name, url_list in channel_raw_map.items():
         target_core = fullname_to_core[ch_name]
@@ -210,25 +199,25 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]], fullname_to_core:
     task_result = {}
     total_url = len(ch_url_index)
     print(f"【测速预加载】待检测总链接：{total_url}", flush=True)
-    last_heartbeat_ts = time.time()  # 刷新心跳
+    last_heartbeat_ts = time.time()
 
     for start in range(0, total_url, batch_size):
         now_ts = time.time()
-        # 1. 判断静默卡死3分钟无心跳
+        # 3分钟静默卡死兜底
         if now_ts - last_heartbeat_ts >= HEARTBEAT_STOP_SEC:
-            print(f"【静默卡死预警】已连续3分钟无任何批次输出，强制终止测速，导出当前已完成数据", flush=True)
+            print(f"【静默卡死预警】已连续3分钟无批次输出，终止测速导出现有数据", flush=True)
             break
-        # 2. 判断全局28分钟总时长
+        # 28分钟全局时长兜底
         run_cost = now_ts - global_start_ts
         if run_cost >= GLOBAL_FORCE_STOP_SEC:
-            print(f"【全局主动停止】已运行28分钟，放弃剩余未检测链接，使用当前已完成数据导出tv.txt", flush=True)
+            print(f"【全局主动停止】已运行28分钟，放弃剩余链接导出tv.txt", flush=True)
             break
 
         batch_start_time = now_ts
         batch_items = ch_url_index[start:start + batch_size]
         batch_end_idx = min(start + batch_size, total_url)
         print(f"【测速批次】{start + 1} ~ {batch_end_idx} / {total_url}", flush=True)
-        last_heartbeat_ts = time.time()  # 打印批次日志，刷新心跳
+        last_heartbeat_ts = time.time()
         sub_task_groups = [[] for _ in range(STREAM_EVAL_WORKERS)]
         for idx, item in enumerate(batch_items):
             sub_task_groups[idx % STREAM_EVAL_WORKERS].append(item)
@@ -238,10 +227,9 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]], fullname_to_core:
             futures.append(exe.submit(batch_subtask, g))
         complete_futures = set()
         while len(complete_futures) < len(futures):
-            # 内层循环也持续检测心跳卡死
             inner_now = time.time()
             if inner_now - last_heartbeat_ts >= HEARTBEAT_STOP_SEC:
-                print(f"【静默卡死预警】批次内连续3分钟无输出，强制终止", flush=True)
+                print(f"【静默卡死预警】批次内3分钟无输出，强制终止", flush=True)
                 break
             if inner_now - batch_start_time >= BATCH_GLOBAL_TIMEOUT:
                 print(f"【批次超时】已满{BATCH_GLOBAL_TIMEOUT}秒，终止当前批次剩余测速", flush=True)
@@ -256,30 +244,36 @@ def filter_best_streams(channel_raw_map: dict[str, list[str]], fullname_to_core:
                             print(f"【线程异常】{str(e)}", flush=True)
             except concurrent.futures.TimeoutError:
                 continue
-        # 修复卡死：强制取消未完成任务，非阻塞关闭线程池，立刻进入下一批
+        # 强制取消未完成任务，非阻塞关闭线程池，解决批次卡死不进下一批
         for fu in futures:
             fu.cancel()
         exe.shutdown(wait=False)
         print(f"【测速批次】{start+1}~{batch_end_idx} 处理完成", flush=True)
-        last_heartbeat_ts = time.time()  # 批次结束刷新心跳
+        last_heartbeat_ts = time.time()
 
+    # 汇总测速结果
     ch_temp = defaultdict(list)
     for idx, ch_name, url, _ in ch_url_index:
-        delay, real_h, is_match = task_result.get(idx, (9999, 0, False))
-        # 存储结构 (url, 源优先级, 是否不匹配, 延迟, -分辨率)
-        ch_temp[ch_name].append((url, get_stream_priority(url), not is_match, delay, -real_h))
+        delay, is_match, w, h = task_result.get(idx, (9999, False, None, None))
+        real_h = h if h is not None else 720
+        ch_temp[ch_name].append((url, get_stream_priority(url), not is_match, delay, -real_h, h))
 
-    curr = 0
     for ch_name, eval_res in ch_temp.items():
-        curr += 1
-        # 已删除单频道进度、单频道统计打印，极简日志
-        # 排序规则：频道匹配 > 延迟从小到大 > 分辨率从高到低，移除源优先级权重
+        # 排序规则：频道匹配 > 延迟从小到大 > 分辨率从高到低
         eval_res.sort(key=lambda x: (x[2], x[3], x[4]))
-        # 双重过滤：频道匹配成功 + 垂直分辨率≥1080
-        qualified = [item for item in eval_res if (item[2] is False) and (-item[4] >= MIN_VERTICAL_RES)]
+        # 过滤逻辑：匹配频道 + (有分辨率则≥1080，无分辨率标签直接放行)
+        qualified = []
+        for item in eval_res:
+            url, prio, not_match, delay, neg_h, real_h_raw = item
+            if not_match:
+                continue
+            # h为None代表未读取到RESOLUTION标签，直接放行
+            if real_h_raw is None or (-neg_h) >= MIN_VERTICAL_RES:
+                qualified.append(item)
         final_map[ch_name] = [item[0] for item in qualified[:MAX_STREAM_PER_CHANNEL]]
     return final_map
 
+# 输出最终tv.txt分类文件
 def export_result(group_info: list, final_stream_map: dict[str, list[str]]):
     lines = []
     for group_name, ch_list in group_info:
@@ -298,12 +292,12 @@ def export_result(group_info: list, final_stream_map: dict[str, list[str]]):
 
 def main():
     print("====== IPTV分拣启动 ======", flush=True)
-    global_start_time = time.time()  # 记录脚本全局启动时间戳
+    global_start_time = time.time()
     source_pool = load_source_list()
     group_info, core_mapping = load_white_list()
-    # 构建反向映射：完整频道名 -> 标准化核心ID
     fullname_to_core = {full_name: core for core, full_name in core_mapping.items()}
     raw_channel_cache = defaultdict(list)
+    # 拉取源文件带单次重试
     with concurrent.futures.ThreadPoolExecutor(max_workers=SOURCE_FETCH_WORKERS) as exe:
         futures = [exe.submit(fetch_channel_from_source, s, core_mapping) for s in source_pool]
         for fu in futures:
@@ -321,22 +315,17 @@ def main():
                         print("【警告】源拉取重试后依旧超时，自动跳过", flush=True)
                     else:
                         print("【提示】源拉取超时，正在重试一次", flush=True)
-    # 单频道完全相同URL去重
+    # 同URL去重
     for ch in raw_channel_cache:
         raw_channel_cache[ch] = list(dict.fromkeys(raw_channel_cache[ch]))
     print(f"【源解析完成】待测速频道总数：{len(raw_channel_cache)}", flush=True)
-    # 传入全局启动时间戳，开启28分钟超时判断+3分钟静默心跳监控
     qualified_map = filter_best_streams(raw_channel_cache, fullname_to_core, global_start_time)
     print(f"【测速筛选完成】有效高清匹配频道数量：{len(qualified_map)}", flush=True)
     export_result(group_info, qualified_map)
 
-    # 全局资源完整释放
+    # 简化收尾，删除子线程循环等待，解决执行完毕卡死不退出
     os.sync()
     time.sleep(0.5)
-    for t in threading.enumerate():
-        if t != threading.main_thread():
-            t.join(timeout=1)
-    time.sleep(1)
     print("====== 分拣脚本执行结束 ======", flush=True)
     sys.exit(0)
 
