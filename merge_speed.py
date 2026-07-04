@@ -36,7 +36,7 @@ def standardize_core_id(raw_name: str) -> str:
     s = raw_name.lower().replace("-", "").replace(" ", "")
     match = re.search(r"cctv(\d+)", s)
     if match:
-        return f"cctv{match}"
+        return f"cctv{match.group(1)}"
     return s
 
 # 新增：判断是否4:3黑边标清画面，True代表要过滤
@@ -178,9 +178,11 @@ def fetch_channel_from_source(src_link: str, core_mapping: dict) -> list[tuple[s
             src_core = standardize_core_id(raw_ch)
             if src_core in core_mapping:
                 full_ch_name = core_mapping[src_core]
+                result_pairs.append((full_ch_name, stream_url))
     except Exception as e:
         if DEBUG_LOG:
             print(f"【调试】源 {src_link} 拉取异常：{str(e)}", flush=True)
+    # 修复：补充返回语句
     return result_pairs
 
 def filter_best_streams(channel_raw_map: dict[str, list[str]], core_mapping: dict) -> dict[str, list[str]]:
@@ -279,19 +281,19 @@ def main():
     print("====== IPTV分拣脚本启动 ======", flush=True)
     source_pool = load_source_list()
     group_info, core_mapping = load_white_list()
-    white_channel_set = set(channel_to_group.keys())
     raw_channel_cache = defaultdict(list)
     with concurrent.futures.ThreadPoolExecutor(max_workers=SOURCE_FETCH_WORKERS) as exe:
         futures = [exe.submit(fetch_channel_from_source, s, core_mapping) for s in source_pool]
         for fu in futures:
             try:
                 pair_list = fu.result(timeout=SOURCE_FETCH_TIMEOUT + 2)
-                for ch, link in pair_list:
-                    raw_channel_cache[ch].append(link)
+                for full_ch, link in pair_list:
+                    raw_channel_cache[full_ch].append(link)
             except concurrent.futures.TimeoutError:
                 print("【警告】单个直播源拉取超时，自动跳过", flush=True)
             except Exception as e:
                 print(f"【警告】直播源处理异常：{str(e)}", flush=True)
+    # 链接去重
     for ch in raw_channel_cache:
         raw_channel_cache[ch] = list(dict.fromkeys(raw_channel_cache[ch]))
     print(f"【阶段1完成】待测速频道总数量：{len(raw_channel_cache)}", flush=True)
