@@ -5,13 +5,13 @@ BASE_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNTIME_LOG = os.path.join(BASE_PATH, "runtime", "logs")
 RUNTIME_CACHE = os.path.join(BASE_PATH, "runtime", "cache")
 OUTPUT_LATEST = os.path.join(BASE_PATH, "output", "latest")
-OUTPUT_ARCHIVE = os.path.join(BASE_PATH, "output", "archive")
+OUTPUT_ARCHIVE = os.path.join(BASE_PATH, "archive")
 
 # 输出文件名
 JSON_RESULT_NAME = "stock_target.json"
 MD_RESULT_NAME = "hot_sector.md"
 
-# 护城河关键词库
+# 护城河赛道库
 MOAT_INDUSTRY = {
     "白酒", "调味品", "创新药", "医疗器械", "稀缺矿产资源",
     "高端芯片制造", "工业软件", "云计算龙头", "机场高速",
