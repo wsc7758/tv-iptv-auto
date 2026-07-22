@@ -36,8 +36,11 @@ jobs:
         run: |
           git config --global user.name "StockBot"
           git config --global user.email "bot@stock.local"
-          # 只跟踪输出结果文件夹，避免提交缓存文件
-          git add output/ archive/ runtime/logs/
+          # 逐个判断目录存在才add
+          [ -d "output" ] && git add output/
+          [ -d "runtime/logs" ] && git add runtime/logs/
+          [ -d "archive" ] && git add archive/
+
           if ! git diff --quiet --cached; then
             git commit -m "🤖 自动更新选股结果 $(date +%Y-%m-%d)"
             git push
