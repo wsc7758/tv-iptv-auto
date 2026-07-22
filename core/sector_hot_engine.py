@@ -32,15 +32,17 @@ def analyze_hot_sector():
         ]
         fund_df = pd.DataFrame(static_sector_list)
 
-    # 财联社新闻（接口已失效，保留兼容代码）
+    # ==========修复新闻代码，增加列存在判断，杜绝KeyError==========
     news_df = get_cailian_news()
     word_freq = {}
-    if news_df is not None and not news_df.empty:
+    if news_df is not None and not news_df.empty and "标题" in news_df.columns:
         all_title = "".join(news_df["标题"].astype(str))
         words = jieba.lcut(all_title)
         for w in words:
             if len(w) >= 2:
                 word_freq[w] = word_freq.get(w, 0) + 1
+    else:
+        print("ℹ️新闻接口不可用或无【标题】字段，新闻热度权重清零")
 
     sentiment_info = calc_sentiment_score()
     emotion_factor = sentiment_info["factor"]
