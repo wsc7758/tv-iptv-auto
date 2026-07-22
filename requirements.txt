@@ -1,5 +1,5 @@
 akshare>=1.12.0
-efinance>=0.6.6
+efinance>=0.5.0
 pandas>=2.0
 numpy
 jieba
